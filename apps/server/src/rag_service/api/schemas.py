@@ -148,3 +148,20 @@ class QueryResponse(BaseModel):
     sources: list[QuerySource]
     latency_ms: int
     tokens: dict | None = None  # {"in": int, "out": int, "cost_usd": float}
+
+
+class TenantInfoResponse(BaseModel):
+    """Response body for ``GET /v1/tenants/me``.
+
+    Surface a tenant's identity plus live storage accounting derived from
+    the ``documents`` table. ``storage_used_mb`` sums ``file_size`` over
+    non-deleted rows and is rounded to 2 decimal places — clients use it
+    to render a quota bar without doing the conversion themselves.
+    ``document_count`` likewise excludes soft-deleted rows.
+    """
+
+    tenant_id: str
+    display_name: str
+    storage_quota_mb: int
+    storage_used_mb: float
+    document_count: int
