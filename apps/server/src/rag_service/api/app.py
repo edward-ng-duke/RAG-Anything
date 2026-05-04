@@ -6,6 +6,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from rag_service.api.routers.conversations import router as conversations_router
 from rag_service.api.routers.health import router as health_router
 from rag_service.api.routers.ingest import router as ingest_router
 from rag_service.api.routers.jobs import router as jobs_router
@@ -99,6 +100,7 @@ def create_app() -> FastAPI:
     app.include_router(query_router)
     app.include_router(tenants_router)
     app.include_router(kg_router)
+    app.include_router(conversations_router)
     app.include_router(metrics_router)
 
     return app

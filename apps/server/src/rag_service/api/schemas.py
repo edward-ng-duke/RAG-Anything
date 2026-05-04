@@ -393,3 +393,81 @@ class KGSubgraphResponse(BaseModel):
 
     nodes: list[KGNode]
     edges: list[KGEdge]
+
+
+# ---------------------------------------------------------------------------
+# Conversations (Task 4.4) — list / create / get / delete + SSE messages
+# ---------------------------------------------------------------------------
+
+
+class ConversationCreate(BaseModel):
+    """Request body for ``POST /v1/conversations``.
+
+    ``title`` is optional; when omitted the row's ``title`` is left ``NULL``
+    and the client renders a friendly placeholder ("New chat").
+    """
+
+    title: str | None = None
+
+
+class ConversationBrief(BaseModel):
+    """One conversation row, used both in the list endpoint and as the
+    "header" portion of the detail endpoint.
+
+    Built directly from the ORM row via ``from_attributes`` so the router
+    never has to manually unpack each column.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    conversation_id: UUID
+    title: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationListResponse(BaseModel):
+    """Response body for ``GET /v1/conversations``."""
+
+    items: list[ConversationBrief]
+
+
+class MessageResponse(BaseModel):
+    """One message row in chronological order.
+
+    ``sources`` is the JSON blob persisted by the orchestrator on the
+    ``done`` event — typically ``{"sources": [...]}`` — and is ``None``
+    for user-authored messages.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    message_id: UUID
+    role: str
+    content: str
+    sources: dict | None
+    created_at: datetime
+
+
+class ConversationDetailResponse(BaseModel):
+    """Response body for ``GET /v1/conversations/{conversation_id}``.
+
+    Bundles the conversation header with its full ordered message list
+    so a client can populate a chat view in one round-trip.
+    """
+
+    conversation: ConversationBrief
+    messages: list[MessageResponse]
+
+
+class SendMessageRequest(BaseModel):
+    """Request body for ``POST /v1/conversations/{conversation_id}/messages``.
+
+    Mirrors the retrieval knobs from :class:`QueryRequest` so the chat
+    surface and one-shot ``/v1/query`` share a vocabulary.
+    """
+
+    content: str
+    mode: str = "hybrid"
+    top_k: int = 10
+    vlm_enhanced: bool = False
