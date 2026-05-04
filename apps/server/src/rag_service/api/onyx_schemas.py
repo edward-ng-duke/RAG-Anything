@@ -115,3 +115,65 @@ class OnyxJobResponse(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     retries: int = 0
+
+
+# --- Query (Task 2.4) ---
+
+
+class OnyxHistoryMessage(BaseModel):
+    """One turn of conversation history forwarded by ONYX in the request body.
+
+    ``role`` is conventionally ``"user"`` or ``"assistant"``; we don't
+    constrain the value because LightRAG passes the list through verbatim
+    and any normalisation belongs at the upstream side.
+    """
+
+    role: str  # 'user' | 'assistant'
+    content: str
+
+
+class OnyxQueryRequest(BaseModel):
+    """Request body for ``POST /v1/onyx/query`` and ``/v1/onyx/query/sync``.
+
+    ONYX is the source of truth for chat history; we accept it in the
+    body and never persist it. ``max_history_turns`` controls how many
+    of the trailing messages are forwarded to RAGAnything — defaults to
+    five so the prompt budget stays predictable across tenants.
+    """
+
+    question: Annotated[str, StringConstraints(min_length=1, max_length=4000)]
+    history: list[OnyxHistoryMessage] = Field(default_factory=list, max_length=50)
+    mode: str = "hybrid"  # hybrid | local | global | naive | mix
+    top_k: int = Field(default=10, ge=1, le=50)
+    vlm_enhanced: bool = False
+    include_sources: bool = True
+    max_history_turns: int = Field(default=5, ge=0, le=20)
+
+
+class OnyxQuerySource(BaseModel):
+    """One retrieved chunk surfaced in the SSE ``done`` event / sync response.
+
+    Mirrors α's :class:`QuerySource` plus ``page`` / ``bbox`` for clients
+    that want to render PDF citations. All fields are optional because
+    RAGAnything's source shape varies by storage backend.
+    """
+
+    document_id: str | None = None
+    file_name: str | None = None
+    chunk_id: str | None = None
+    score: float | None = None
+    snippet: str | None = None
+    modality: str | None = None
+    page: int | None = None
+    bbox: list[float] | None = None
+
+
+class OnyxQuerySyncResponse(BaseModel):
+    """Response body for the non-streaming ``/v1/onyx/query/sync`` endpoint."""
+
+    request_id: str
+    answer: str
+    sources: list[OnyxQuerySource]
+    latency_ms: int
+    tokens: dict[str, int] | None = None
+    warnings: list[str] = Field(default_factory=list)
