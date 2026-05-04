@@ -30,6 +30,7 @@ dev = [
     "pytest-asyncio",
     "testcontainers[postgres,redis]",
     "ruff",
+    "fakeredis[lua]>=2.35.1",
 ]
 
 [tool.uv.sources]
