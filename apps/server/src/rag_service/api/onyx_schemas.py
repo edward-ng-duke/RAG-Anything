@@ -98,3 +98,20 @@ class OnyxDocumentListResponse(BaseModel):
 
     items: list[OnyxDocumentListItem]
     next_cursor: str | None = None
+
+
+# --- Jobs (Task 2.3) ---
+
+
+class OnyxJobResponse(BaseModel):
+    """Mirrors α's JobResponse but renamed to keep the onyx schema namespace."""
+    job_id: str
+    document_id: str | None
+    job_type: str
+    status: str
+    progress: dict | None = None
+    error_message: str | None = None
+    created_at: datetime | None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    retries: int = 0
