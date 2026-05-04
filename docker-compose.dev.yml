@@ -39,7 +39,11 @@ services:
     environment: &rag-env
       DATABASE_URL: postgresql+asyncpg://rag:rag@pg:5432/rag
       REDIS_URL: redis://redis:6379/0
-      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-secret}
+      # INTERNAL_TOKEN must be ≥64 chars (Settings validator); default is
+      # padded to 64 so a fresh `docker compose up` works without an
+      # explicit value while still satisfying the length check.
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-secret-dev-secret-dev-secret-dev-secret-dev-secret-dev-secret-pad}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
       LLM_BASE_URL: ${LLM_BASE_URL}
       LLM_API_KEY: ${LLM_API_KEY}
       LLM_MODEL: ${LLM_MODEL}
@@ -52,8 +56,12 @@ services:
       DATA_DIR: /data
       MAX_UPLOAD_MB: 1000
       LRU_INSTANCE_CAP: 32
+      # ONYX integration knobs — empty defaults disable the optional gates.
+      INTERNAL_TOKENS_LEGACY: ${INTERNAL_TOKENS_LEGACY:-}
+      ONYX_BACKEND_ALLOWED_CIDRS: ${ONYX_BACKEND_ALLOWED_CIDRS:-}
+      ONYX_RATELIMIT_OVERRIDES_JSON: ${ONYX_RATELIMIT_OVERRIDES_JSON:-}
     ports:
-      - "8000:8000"
+      - "8800:8000"
     volumes:
       - rag-data:/data
     depends_on:
@@ -76,6 +84,18 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks: [rag-dev-net]
+
+  web:
+    build:
+      context: apps/web
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8800}
+    ports:
+      - "3300:3000"
+    depends_on:
+      - api
     networks: [rag-dev-net]
 
 volumes:
