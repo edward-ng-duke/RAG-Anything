@@ -24,6 +24,10 @@ dependencies = [
     "httpx",
 ]
 
+[project.scripts]
+rag-api = "rag_service.cli:rag_api"
+rag-worker = "rag_service.cli:rag_worker"
+
 [dependency-groups]
 dev = [
     "pytest",
