@@ -1,0 +1,120 @@
+services:
+  pg:
+    image: ${PG_IMAGE:-rag-pg-age:latest}
+    build:
+      context: apps/server/docker
+      dockerfile: poc-pg.Dockerfile
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: ${POSTGRES_DB:-rag}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag}"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    networks: [rag-prod-net]
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    networks: [rag-prod-net]
+
+  api:
+    image: ${API_IMAGE:-rag-service:latest}
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    command: ["rag-api"]
+    environment: &rag-env
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD}@pg:5432/${POSTGRES_DB:-rag}
+      REDIS_URL: redis://redis:6379/0
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:?required}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?required}
+      LLM_BASE_URL: ${LLM_BASE_URL:?required}
+      LLM_API_KEY: ${LLM_API_KEY:?required}
+      LLM_MODEL: ${LLM_MODEL:?required}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:?required}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:?required}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:?required}
+      VLM_MODEL: ${VLM_MODEL:-}
+      MINERU_CLOUD_API_KEY: ${MINERU_CLOUD_API_KEY:-}
+      PARSER_MODE: ${PARSER_MODE:-mineru_cloud}
+      DATA_DIR: /data
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-1000}
+      LRU_INSTANCE_CAP: ${LRU_INSTANCE_CAP:-32}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - rag-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      pg: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    networks: [rag-prod-net]
+
+  worker:
+    image: ${API_IMAGE:-rag-service:latest}
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    command: ["rag-worker"]
+    environment: *rag-env
+    volumes:
+      - rag-data:/data
+    depends_on:
+      pg: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    networks: [rag-prod-net]
+
+  web:
+    image: ${WEB_IMAGE:-rag-web:latest}
+    build:
+      context: apps/web
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks: [rag-prod-net]
+
+volumes:
+  pg-data:
+  redis-data:
+  rag-data:
+
+networks:
+  rag-prod-net:
+    driver: bridge
