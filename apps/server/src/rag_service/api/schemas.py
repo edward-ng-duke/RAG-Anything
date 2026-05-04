@@ -12,9 +12,10 @@ alongside :class:`IngestResponse`.
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class IngestResponse(BaseModel):
@@ -41,3 +42,25 @@ class IngestResponse(BaseModel):
     document_id: UUID
     status: str
     deduplicated: bool
+
+
+class JobResponse(BaseModel):
+    """Response body for ``GET /v1/jobs/{job_id}``.
+
+    Mirrors the ``jobs`` table columns the client cares about. ``progress``
+    is the JSONB blob populated by the worker (``stage``, percentages, ...).
+    The model is built from the ORM row directly via ``from_attributes``.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    job_id: UUID
+    document_id: UUID | None
+    job_type: str
+    status: str
+    progress: dict
+    error_message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    retries: int
