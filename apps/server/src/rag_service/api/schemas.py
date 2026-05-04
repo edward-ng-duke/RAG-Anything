@@ -64,3 +64,38 @@ class JobResponse(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     retries: int
+
+
+class DocumentResponse(BaseModel):
+    """Response body for a single document row.
+
+    Mirrors the slice of the ``documents`` table the client needs to render
+    a list / detail view. Built directly from the ORM row via
+    ``from_attributes``; the underlying ``storage_path`` is intentionally
+    not exposed — clients only ever address documents by their UUID.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    document_id: UUID
+    tenant_id: str
+    file_name: str
+    file_size: int | None
+    content_hash: str
+    mime_type: str | None
+    status: str
+    uploaded_at: datetime
+    indexed_at: datetime | None
+    error_message: str | None
+
+
+class DocumentListResponse(BaseModel):
+    """Response body for ``GET /v1/documents``.
+
+    ``next_cursor`` is an opaque base64-encoded ``(uploaded_at, document_id)``
+    tuple; clients pass it back verbatim in the ``cursor`` query param. A
+    ``None`` value means "no more pages".
+    """
+
+    items: list[DocumentResponse]
+    next_cursor: str | None
