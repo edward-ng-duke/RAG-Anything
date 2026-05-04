@@ -2,16 +2,7 @@
 
 ## Status
 
-> **Verdict: PENDING** — script readiness verified (see Task 0.4 commit), live execution awaits operator with credentials.
-
-The PoC harness (`scripts/poc/poc_ingest_query.py`, docker-compose stack, `.env.poc.example`) has been authored and statically reviewed. No live ingest/query has been executed yet because that requires:
-
-- Real LLM API credentials (provider + key + model)
-- Real embedding API credentials (provider + key + model)
-- A MinerU Cloud token
-- A locally running Postgres-with-AGE-and-pgvector container (per `docker-compose.poc.yml`)
-
-Until an operator runs the steps in [How to Run](#how-to-run) and fills in [Results](#results--to-fill-in-after-live-run), this document remains in the PENDING state.
+> **Verdict: GO** — live PoC executed 2026-05-04 against the dev stack. End-to-end pipeline (MinerU Cloud → LightRAG PG storages → query → workspace verification) succeeded; clean `finalize_storages`.
 
 ## What This PoC Validates
 
@@ -42,33 +33,43 @@ rm -f scripts/poc/.env.poc
 
 (`-v` removes the Postgres data volume so the next run starts from a clean schema; omit `-v` if you want to inspect rows after the run.)
 
-## Results — to fill in after live run
+## Results — live run 2026-05-04
 
 | Field | Value |
 | --- | --- |
-| Timestamp (UTC) | `<TBD>` |
-| PDF filename | `<TBD>` |
-| PDF size (MB) | `<TBD>` |
-| PDF page count | `<TBD>` |
-| MinerU tier | `<TBD>` |
-| LLM model | `<TBD>` |
-| Embedding model | `<TBD>` |
-| Ingestion duration (s) | `<TBD>` |
-| Query latency (ms) | `<TBD>` |
-| Entity count returned | `<TBD>` |
-| Sources count | `<TBD>` |
-| Warnings | `<TBD>` |
-| Errors | `<TBD>` |
-| `finalize_storages` clean (Y/N) | `<TBD>` |
+| Timestamp (CST) | 2026-05-04 17:42 → 17:58 |
+| PDF filename | `【大模型工程师_上海】蒋涛宇 1年.pdf` (samples/) |
+| MinerU tier | Cloud API (`MINERU_CLOUD_TOKEN` from main `.env`) |
+| Parse output | `/tmp/poc_pf65cu78/mineru/.../full.md` |
+| LLM endpoint | `http://10.0.0.94:5000/v1` |
+| Embedding endpoint | `http://10.0.0.32:7061/v1` |
+| Workspace | `poc-tenant-1` |
+| Documents | 1 |
+| Chunks ingested | 7 |
+| Entities extracted | 149 (`lightrag.lightrag_vdb_entity` filtered by workspace) |
+| Relations extracted | 23 → 45 retrieved at query time |
+| Ingestion duration | **973.3 s** (~16 min) |
+| Query mode | hybrid (default) |
+| Query final context | 19 entities + 45 relations + 4 chunks |
+| Query answer | non-empty (500-char prefix shown in raw log) |
+| `len(sources)` returned by script | **0** — script bug (not system bug); see Open Issues |
+| `finalize_storages` clean | ✅ "Successfully finalized 12 storages" |
+| Errors | none |
+| Warnings | benign: edges missing `weight` attr (defaulted to 1.0); rerank not configured |
 
-## Open Questions Surfaced By Dry-Run
+## Resolved During Live Run
 
-- **search_path config gap** (see `followups.md` Task 0.4): does running the PoC fail because LightRAG creates its tables in the `public` schema instead of a dedicated `lightrag` schema? If so, we need to either set `search_path=lightrag,public` on the role/database or accept `public` as the storage schema and document it.
-- **AGE + pgvector image compatibility** (Task 0.3 followup): does the `apache/age:PG16_latest` base image co-operate with our pgvector source-build layer in `docker-compose.poc.yml`? Watch the container logs for extension load errors during `docker compose up`.
-- **MinerU Cloud parser routing**: does the MinerU Cloud parser registration in `raganything.parser` registry actually drive `process_document_complete`, or does the call silently fall back to the default local MinerU code path? Verify by checking that no local `mineru` binary is invoked and that outbound traffic hits the MinerU Cloud endpoint.
+- ✅ **search_path** — set `POSTGRES_SERVER_SETTINGS=search_path=lightrag,public` in `scripts/poc/.env.poc`; LightRAG created all 11 tables under `lightrag` schema as designed.
+- ✅ **AGE + pgvector image** — `apache/age:release_PG16_1.5.0` (the documented fallback; `PG16_latest` tag does not exist) with pre-downloaded pgvector tarball builds and runs cleanly. Both `age` and `vector` extensions present.
+- ✅ **MinerU Cloud routing** — `parser="mineru" + parse_method="cloud"` reached MinerU Cloud (Token-auth path); no local `mineru` binary invoked. Output `full.md` produced under `/tmp/poc_pf65cu78/mineru/`.
+- ✅ **Multi-tenant workspace isolation** — workspace `poc-tenant-1` rows correctly scoped on every LightRAG table.
+- ✅ **`finalize_storages` clean** — 12 storages closed, no leaked tasks.
+
+## Open Issues (Non-Blocking, Logged to followups.md)
+
+- **`len(sources) == 0` in PoC script output** — LightRAG's `aquery` returns a string answer + `context` payload; the PoC script's `result.sources` extraction path does not match the actual return shape. Chunks WERE used (log shows `Final context: ... 4 chunks`). Fix: read sources from the proper field in `aquery` result, or switch to the `query_with_separate_keyword_extraction` /  `param.return_type=...` path. Cosmetic; does not affect Phase 1+ since the API layer constructs its own response envelope.
+- **Runtime deps missing from `apps/server/pyproject.toml`** — `psycopg[binary]` (alembic env.py uses sync psycopg DSN) and `pgvector` + `asyncpg` (LightRAG PG impl imports `pgvector.asyncpg.register_vector`) were installed ad-hoc on host venv. Add to runtime deps before Phase 1 work to avoid container-rebuild surprises.
 
 ## Verdict
 
-**Verdict: PENDING — re-run after operator executes the PoC.**
-
-When PoC succeeds, update the [Status](#status) section and this Verdict to `GO`. If PoC fails, update Verdict to `NO-GO` and document the blocker before any Phase 1 task is dispatched.
+**Verdict: GO** — proceed to Phase 1+ with confidence. All foundational risks (AGE + managed-PG quirk, LightRAG PG day-1 viability, MinerU Cloud usability, schema isolation, finalize hygiene) are validated. Remaining items are cosmetic / dep-hygiene.

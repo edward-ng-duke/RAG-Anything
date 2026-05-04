@@ -722,6 +722,7 @@ class MineruParser(Parser):
         device: Optional[str] = None,
         source: Optional[str] = None,
         vlm_url: Optional[str] = None,
+        api_url: Optional[str] = None,
         timeout: Optional[int] = None,
         **kwargs,
     ) -> None:
@@ -773,6 +774,8 @@ class MineruParser(Parser):
             cmd.extend(["-d", device])
         if vlm_url:
             cmd.extend(["-u", vlm_url])
+        if api_url:
+            cmd.extend(["--api-url", api_url])
 
         output_lines = []
         error_lines = []

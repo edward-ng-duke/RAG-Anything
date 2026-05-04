@@ -25,13 +25,16 @@ COPY apps/server/README.md apps/server/README.md
 # uv lockfile, if present (best-effort; the build still works without it via --frozen fallback).
 COPY apps/server/uv.loc[k] apps/server/uv.lock
 
+# Copy app source BEFORE uv sync. The hatchling build backend (declared in
+# apps/server/pyproject.toml) needs src/rag_service/ to exist when uv resolves
+# and installs the rag-service package itself, otherwise only deps are
+# installed and the rag_service module is missing at runtime.
+COPY apps/server/src apps/server/src
+COPY apps/server/alembic apps/server/alembic
+COPY apps/server/alembic.ini apps/server/alembic.ini
+
 WORKDIR /app/apps/server
 RUN uv sync --no-dev --frozen 2>/dev/null || uv sync --no-dev
-
-# Copy app source last so code-only edits don't bust the dependency cache.
-COPY apps/server/src ./src
-COPY apps/server/alembic ./alembic
-COPY apps/server/alembic.ini ./alembic.ini
 
 
 FROM python:3.11-slim AS runner
