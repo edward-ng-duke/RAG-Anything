@@ -10,6 +10,7 @@ from rag_service.api.routers.health import router as health_router
 from rag_service.api.routers.ingest import router as ingest_router
 from rag_service.api.routers.jobs import router as jobs_router
 from rag_service.api.routers.documents import router as documents_router
+from rag_service.api.routers.kg import router as kg_router
 from rag_service.api.routers.query import router as query_router
 from rag_service.api.routers.tenants import router as tenants_router
 from rag_service.observability.metrics import metrics_router
@@ -97,6 +98,7 @@ def create_app() -> FastAPI:
     app.include_router(documents_router)
     app.include_router(query_router)
     app.include_router(tenants_router)
+    app.include_router(kg_router)
     app.include_router(metrics_router)
 
     return app

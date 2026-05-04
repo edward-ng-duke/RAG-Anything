@@ -278,3 +278,72 @@ class SelectTenantResponse(BaseModel):
 
     access_token: str
     tenant_id: str
+
+
+# ---------------------------------------------------------------------------
+# Knowledge graph (Task 3.3) — flat entities / relations / chunks / stats
+# ---------------------------------------------------------------------------
+
+
+class KGEntity(BaseModel):
+    """One entity row from LightRAG's flat ``lightrag_vdb_entity`` table.
+
+    Mirrors the slice the client cares about. ``properties`` is reserved
+    for future enrichment from the AGE graph layer (Task 3.4) — the flat
+    VDB row alone doesn't carry typed properties, so it is ``None`` today.
+    """
+
+    id: str
+    entity_name: str | None = None
+    entity_type: str | None = None
+    content: str | None = None
+    file_path: str | None = None
+    properties: dict | None = None
+
+
+class KGEntityListResponse(BaseModel):
+    """Cursor-paginated list of entities scoped to the caller's tenant."""
+
+    items: list[KGEntity]
+    next_cursor: str | None = None
+
+
+class KGRelation(BaseModel):
+    """One relation row from LightRAG's flat ``lightrag_vdb_relation`` table.
+
+    LightRAG stores entity *names* (not surrogate keys) in
+    ``source_id`` / ``target_id``; the names are surfaced verbatim.
+    """
+
+    id: str
+    source_id: str | None = None
+    target_id: str | None = None
+    type: str | None = None
+    content: str | None = None
+    file_path: str | None = None
+
+
+class KGRelationListResponse(BaseModel):
+    """Cursor-paginated list of relations scoped to the caller's tenant."""
+
+    items: list[KGRelation]
+    next_cursor: str | None = None
+
+
+class KGChunk(BaseModel):
+    """One chunk row from LightRAG's flat ``lightrag_doc_chunks`` table."""
+
+    id: str
+    content: str | None = None
+    full_doc_id: str | None = None
+    chunk_order_index: int | None = None
+    tokens: int | None = None
+    file_path: str | None = None
+
+
+class KGStats(BaseModel):
+    """Per-tenant counts surfaced by ``GET /v1/kg/stats``."""
+
+    entities: int
+    relations: int
+    chunks: int
