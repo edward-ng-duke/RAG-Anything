@@ -22,7 +22,7 @@ import os
 # only has to satisfy ``Settings`` validation.
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
-os.environ.setdefault("INTERNAL_TOKEN", "e2e-secret")
+os.environ.setdefault("INTERNAL_TOKEN", "e" * 64)
 os.environ.setdefault("LLM_BASE_URL", "http://test-llm/v1")
 os.environ.setdefault("LLM_API_KEY", "x")
 os.environ.setdefault("LLM_MODEL", "test-model")

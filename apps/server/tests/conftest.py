@@ -8,7 +8,7 @@ import os
 
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://x@x/x")
 os.environ.setdefault("REDIS_URL", "redis://x")
-os.environ.setdefault("INTERNAL_TOKEN", "test-secret")
+os.environ.setdefault("INTERNAL_TOKEN", "t" * 64)
 os.environ.setdefault("LLM_BASE_URL", "http://x")
 os.environ.setdefault("LLM_API_KEY", "x")
 os.environ.setdefault("LLM_MODEL", "x")

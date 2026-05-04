@@ -6,10 +6,20 @@ when missing; optional fields fall back to documented defaults.
 
 from __future__ import annotations
 
+import ipaddress
+import json
 from pathlib import Path
+from typing import Annotated, Any
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# Whitelist of allowed keys for ``onyx_ratelimit_overrides``. Any key outside
+# this set is treated as a typo and rejected, so operators learn about
+# misspellings at startup rather than at request time.
+_ONYX_RATELIMIT_KEYS: frozenset[str] = frozenset(
+    {"query", "docs_post", "kg", "other", "token_total"}
+)
 
 
 class Settings(BaseSettings):
@@ -37,6 +47,28 @@ class Settings(BaseSettings):
     access_token_ttl_min: int = Field(default=15, alias="ACCESS_TOKEN_TTL_MIN")
     refresh_token_ttl_days: int = Field(default=7, alias="REFRESH_TOKEN_TTL_DAYS")
 
+    # ---- ONYX integration knobs ----
+    # Each of these reads a custom env-string format (comma-separated, JSON).
+    # We use ``Annotated[..., NoDecode]`` so pydantic-settings hands the raw
+    # env string to our validator instead of trying to JSON-decode it itself.
+    #
+    # Legacy ``INTERNAL_TOKEN`` values still accepted during a token rotation.
+    # Comma-separated; deduplicated; each entry must satisfy the same ≥ 64
+    # length floor as the live token.
+    internal_tokens_legacy: Annotated[list[str], NoDecode] = Field(
+        default_factory=list, alias="INTERNAL_TOKENS_LEGACY"
+    )
+    # Comma-separated CIDR allowlist for ONYX-side traffic. Empty = no
+    # allowlist enforced. Validated as ``ipaddress.ip_network(strict=False)``.
+    onyx_backend_allowed_cidrs: Annotated[list[str], NoDecode] = Field(
+        default_factory=list, alias="ONYX_BACKEND_ALLOWED_CIDRS"
+    )
+    # JSON dict of per-bucket rate-limit overrides. Keys constrained to a
+    # whitelist (see :data:`_ONYX_RATELIMIT_KEYS`); values must be ints.
+    onyx_ratelimit_overrides: Annotated[dict[str, int], NoDecode] = Field(
+        default_factory=dict, alias="ONYX_RATELIMIT_OVERRIDES_JSON"
+    )
+
     @field_validator("jwt_secret_key")
     @classmethod
     def _validate_jwt_secret_length(cls, v: str) -> str:
@@ -44,6 +76,125 @@ class Settings(BaseSettings):
         if not isinstance(v, str) or len(v) < 64:
             raise ValueError("jwt_secret_key must be at least 64 characters long")
         return v
+
+    @field_validator("internal_token")
+    @classmethod
+    def _validate_internal_token_length(cls, v: str) -> str:
+        """Reject short ``INTERNAL_TOKEN`` values.
+
+        This is the service-grade shared secret authenticating ONYX → RAG
+        traffic; short tokens are unacceptable for that role.
+        """
+        if not isinstance(v, str) or len(v) < 64:
+            raise ValueError("internal_token must be at least 64 characters long")
+        return v
+
+    @field_validator("internal_tokens_legacy", mode="before")
+    @classmethod
+    def _parse_internal_tokens_legacy(cls, v: Any) -> list[str]:
+        """Parse a comma-separated env string into a deduplicated list.
+
+        Empty / unset / blank → ``[]``. Order of first occurrence is
+        preserved when de-duplicating so operators can predict behavior.
+        Each non-empty entry must be ≥ 64 chars; otherwise we raise so
+        startup fails loudly.
+        """
+        if v is None or v == "":
+            return []
+        if isinstance(v, list):
+            tokens = [str(t).strip() for t in v if str(t).strip()]
+        elif isinstance(v, str):
+            tokens = [t.strip() for t in v.split(",") if t.strip()]
+        else:
+            raise ValueError(
+                "INTERNAL_TOKENS_LEGACY must be a comma-separated string"
+            )
+        # Order-preserving dedup: dict.fromkeys keeps insertion order in
+        # Python 3.7+, which is the contract we want for token rotation
+        # (newer entries first → older ones at the tail).
+        deduped = list(dict.fromkeys(tokens))
+        for tok in deduped:
+            if len(tok) < 64:
+                raise ValueError(
+                    "every INTERNAL_TOKENS_LEGACY entry must be at least 64 "
+                    "characters long"
+                )
+        return deduped
+
+    @field_validator("onyx_backend_allowed_cidrs", mode="before")
+    @classmethod
+    def _parse_onyx_backend_allowed_cidrs(cls, v: Any) -> list[str]:
+        """Parse comma-separated CIDRs and validate each one.
+
+        Uses ``strict=False`` so host-bit-set forms like ``192.168.0.5/32``
+        round-trip cleanly. Returns the canonical string form of each
+        network so downstream code doesn't need to re-parse.
+        """
+        if v is None or v == "":
+            return []
+        if isinstance(v, list):
+            raw = [str(t).strip() for t in v if str(t).strip()]
+        elif isinstance(v, str):
+            raw = [t.strip() for t in v.split(",") if t.strip()]
+        else:
+            raise ValueError(
+                "ONYX_BACKEND_ALLOWED_CIDRS must be a comma-separated string"
+            )
+        out: list[str] = []
+        for entry in raw:
+            try:
+                net = ipaddress.ip_network(entry, strict=False)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(
+                    f"invalid CIDR in ONYX_BACKEND_ALLOWED_CIDRS: {entry!r} ({exc})"
+                ) from exc
+            out.append(str(net))
+        return out
+
+    @field_validator("onyx_ratelimit_overrides", mode="before")
+    @classmethod
+    def _parse_onyx_ratelimit_overrides(cls, v: Any) -> dict[str, int]:
+        """Parse a JSON dict env string with strict key/value typing.
+
+        Empty / unset → ``{}``. Invalid JSON, unknown key, or non-int value
+        all raise so misconfiguration is caught at startup rather than at
+        the rate-limit decision point.
+        """
+        if v is None or v == "":
+            return {}
+        if isinstance(v, dict):
+            data: dict[str, Any] = dict(v)
+        elif isinstance(v, str):
+            try:
+                data = json.loads(v)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"ONYX_RATELIMIT_OVERRIDES_JSON is not valid JSON: {exc}"
+                ) from exc
+            if not isinstance(data, dict):
+                raise ValueError(
+                    "ONYX_RATELIMIT_OVERRIDES_JSON must be a JSON object"
+                )
+        else:
+            raise ValueError(
+                "ONYX_RATELIMIT_OVERRIDES_JSON must be a JSON object string"
+            )
+        out: dict[str, int] = {}
+        for key, value in data.items():
+            if key not in _ONYX_RATELIMIT_KEYS:
+                raise ValueError(
+                    f"unknown key {key!r} in ONYX_RATELIMIT_OVERRIDES_JSON; "
+                    f"allowed keys: {sorted(_ONYX_RATELIMIT_KEYS)}"
+                )
+            # ``bool`` is a subclass of ``int`` in Python; reject it
+            # explicitly so ``true``/``false`` don't sneak through as 1/0.
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise ValueError(
+                    f"value for {key!r} in ONYX_RATELIMIT_OVERRIDES_JSON "
+                    f"must be an int, got {type(value).__name__}"
+                )
+            out[key] = value
+        return out
 
     model_config = SettingsConfigDict(
         env_file=".env",

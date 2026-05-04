@@ -25,7 +25,7 @@ import os
 
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://u:p@h:5432/dbn")
 os.environ.setdefault("REDIS_URL", "redis://x")
-os.environ.setdefault("INTERNAL_TOKEN", "x")
+os.environ.setdefault("INTERNAL_TOKEN", "x" * 64)
 os.environ.setdefault("LLM_BASE_URL", "http://llm")
 os.environ.setdefault("LLM_API_KEY", "x")
 os.environ.setdefault("LLM_MODEL", "m")
