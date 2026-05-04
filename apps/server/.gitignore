@@ -1,0 +1,5 @@
+# Per-app gitignore exceptions for the rag-service app.
+# Root .gitignore has *.ini and test_* rules; we re-include things we need here.
+!alembic.ini
+!tests/**/test_*.py
+!tests/**/conftest.py
