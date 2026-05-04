@@ -1,0 +1,1435 @@
+openapi: 3.1.0
+info:
+  title: RAG-Anything ↔ ONYX integration API
+  version: v1
+  description: Service-to-service surface used by the ONYX backend to drive RAG-Anything's
+    KB / documents / query / KG features. See ONYX_INTEGRATION_PLAN.md for the full
+    integration guide.
+paths:
+  /v1/onyx/kb:
+    post:
+      tags:
+      - onyx-kb
+      summary: Create Kb
+      operationId: create_kb_v1_onyx_kb_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateKBRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KBDetail'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      tags:
+      - onyx-kb
+      summary: List Kbs
+      operationId: list_kbs_v1_onyx_kb_get
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cursor
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      - name: onyx_workspace_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Onyx Workspace Id
+      - name: onyx_owner_user_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Onyx Owner User Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KBListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/onyx/kb/{kb_id}:
+    get:
+      tags:
+      - onyx-kb
+      summary: Get Kb
+      operationId: get_kb_v1_onyx_kb__kb_id__get
+      parameters:
+      - name: kb_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Kb Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KBDetail'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    delete:
+      tags:
+      - onyx-kb
+      summary: Delete Kb
+      operationId: delete_kb_v1_onyx_kb__kb_id__delete
+      parameters:
+      - name: kb_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Kb Id
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/onyx/documents:
+    post:
+      tags:
+      - onyx-documents
+      summary: Upload Document
+      description: 'Accept a multipart upload for the KB identified by ``X-Onyx-KB-Id``.
+
+
+        Returns 202 once the document row is committed and the
+
+        ``ingest_document`` arq task is enqueued. Quota / size / MIME /
+
+        dedup decisions all happen inside
+
+        :func:`rag_service.services.ingest.perform_upload`.
+
+
+        ``ctx.kb_id`` is guaranteed non-null by
+
+        :func:`onyx_service_auth` (the dep raises 400 / 404 otherwise),
+
+        so the explicit ``str(...)`` guard below is purely defensive
+
+        against future refactors.'
+      operationId: upload_document_v1_onyx_documents_post
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_upload_document_v1_onyx_documents_post'
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnyxDocumentResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      tags:
+      - onyx-documents
+      summary: List Documents
+      description: 'List documents in this KB.
+
+
+        Pagination is keyset on ``(uploaded_at DESC, document_id DESC)``.
+
+        The client passes the previous page''s ``next_cursor`` back
+
+        verbatim; the cursor encodes the ``(uploaded_at, document_id)``
+
+        pair of the last row of that page so we can use a strict less-than
+
+        predicate. This avoids the OFFSET pitfalls (skipped / duplicated
+
+        rows) that LIMIT/OFFSET would have under concurrent inserts.'
+      operationId: list_documents_v1_onyx_documents_get
+      parameters:
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cursor
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          default: 50
+          title: Limit
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnyxDocumentListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/onyx/documents/{document_id}:
+    get:
+      tags:
+      - onyx-documents
+      summary: Get Document
+      description: 'Fetch a single document row owned by the caller''s KB.
+
+
+        Raises 404 when the row does not exist *or* belongs to another
+
+        KB — we never leak the existence of another KB''s document.'
+      operationId: get_document_v1_onyx_documents__document_id__get
+      parameters:
+      - name: document_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Document Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnyxDocumentListItem'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    delete:
+      tags:
+      - onyx-documents
+      summary: Delete Document
+      description: 'Soft-delete the document and enqueue a KB rebuild.
+
+
+        The actual physical purge (LightRAG working dir, vector store,
+
+        etc.) is the ``rebuild_index`` worker''s job — we just flip
+
+        ``status`` to ``"deleted"`` and signal the worker. 204 on
+
+        success, 404 when the row doesn''t exist for this KB.'
+      operationId: delete_document_v1_onyx_documents__document_id__delete
+      parameters:
+      - name: document_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Document Id
+      responses:
+        '204':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/onyx/jobs/{job_id}:
+    get:
+      tags:
+      - onyx-jobs
+      summary: Get Job
+      operationId: get_job_v1_onyx_jobs__job_id__get
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Job Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnyxJobResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/onyx/query:
+    post:
+      tags:
+      - onyx-query
+      summary: Query Stream
+      description: 'Stream a RAG answer as Server-Sent Events.
+
+
+        Frame ordering is ``meta`` → ``chunk*`` → ``done`` on success and
+
+        ``meta`` → ``error`` on upstream failure. The HTTP status stays 200
+
+        in both cases — error semantics live inside the SSE body so a
+
+        consumer always opens one persistent stream and parses one shape.'
+      operationId: query_stream_v1_onyx_query_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnyxQueryRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/onyx/query/sync:
+    post:
+      tags:
+      - onyx-query
+      summary: Query Sync
+      description: 'Non-streaming variant — returns the same payload as the SSE ``done``
+        event.
+
+
+        Upstream LLM transport errors surface as 502; everything else is a
+
+        500. We don''t 4xx upstream errors because a 4xx from the LLM is
+
+        almost always a misconfiguration on our side, not the client''s.'
+      operationId: query_sync_v1_onyx_query_sync_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnyxQueryRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OnyxQuerySyncResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/onyx/kg/entities:
+    get:
+      tags:
+      - onyx-kg
+      summary: List Entities
+      description: List entities owned by ``ctx.kb_id`` (alias of α ``list_entities``).
+      operationId: list_entities_v1_onyx_kg_entities_get
+      parameters:
+      - name: type
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Type
+      - name: search
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Search
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cursor
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KGEntityListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/onyx/kg/entities/{entity_id}:
+    get:
+      tags:
+      - onyx-kg
+      summary: Get Entity
+      description: Return one entity row scoped to ``ctx.kb_id``; 404 on miss / cross-KB.
+      operationId: get_entity_v1_onyx_kg_entities__entity_id__get
+      parameters:
+      - name: entity_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Entity Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KGEntity'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/onyx/kg/relations:
+    get:
+      tags:
+      - onyx-kg
+      summary: List Relations
+      description: List relations owned by ``ctx.kb_id`` (alias of α ``list_relations``).
+      operationId: list_relations_v1_onyx_kg_relations_get
+      parameters:
+      - name: source
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source
+      - name: target
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Target
+      - name: type
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Type
+      - name: cursor
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cursor
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 200
+          minimum: 1
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KGRelationListResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/onyx/kg/chunks/{chunk_id}:
+    get:
+      tags:
+      - onyx-kg
+      summary: Get Chunk
+      description: Return one chunk row scoped to ``ctx.kb_id``; 404 on miss.
+      operationId: get_chunk_v1_onyx_kg_chunks__chunk_id__get
+      parameters:
+      - name: chunk_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Chunk Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KGChunk'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/onyx/kg/stats:
+    get:
+      tags:
+      - onyx-kg
+      summary: Get Stats
+      description: Return ``{entities, relations, chunks}`` counts for ``ctx.kb_id``.
+      operationId: get_stats_v1_onyx_kg_stats_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KGStats'
+  /v1/onyx/kg/entities/{entity_id}/neighbors:
+    get:
+      tags:
+      - onyx-kg
+      summary: Get Neighbors
+      description: k-hop neighbourhood of ``entity_id`` for ``ctx.kb_id``.
+      operationId: get_neighbors_v1_onyx_kg_entities__entity_id__neighbors_get
+      parameters:
+      - name: entity_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Entity Id
+      - name: depth
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 3
+          minimum: 1
+          default: 1
+          title: Depth
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KGSubgraphResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/onyx/kg/subgraph:
+    get:
+      tags:
+      - onyx-kg
+      summary: Get Subgraph
+      description: 'Multi-source subgraph rooted at comma-separated ``entities``.
+
+
+        Empty input and lists longer than 50 IDs are explicitly rejected
+
+        with a 400 — same shape as α''s ``/v1/kg/subgraph``.'
+      operationId: get_subgraph_v1_onyx_kg_subgraph_get
+      parameters:
+      - name: entities
+        in: query
+        required: true
+        schema:
+          type: string
+          description: Comma-separated entity IDs
+          title: Entities
+        description: Comma-separated entity IDs
+      - name: depth
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 3
+          minimum: 1
+          default: 2
+          title: Depth
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KGSubgraphResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+components:
+  schemas:
+    Body_upload_document_v1_onyx_documents_post:
+      properties:
+        file:
+          type: string
+          contentMediaType: application/octet-stream
+          title: File
+      type: object
+      required:
+      - file
+      title: Body_upload_document_v1_onyx_documents_post
+    CreateKBRequest:
+      properties:
+        display_name:
+          type: string
+          maxLength: 200
+          minLength: 1
+          title: Display Name
+        onyx_workspace_id:
+          anyOf:
+          - type: string
+            maxLength: 64
+          - type: 'null'
+          title: Onyx Workspace Id
+        onyx_owner_user_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Onyx Owner User Id
+        storage_quota_mb:
+          type: integer
+          maximum: 102400.0
+          minimum: 64.0
+          title: Storage Quota Mb
+          default: 1024
+      type: object
+      required:
+      - display_name
+      title: CreateKBRequest
+      description: Body for POST /v1/onyx/kb.
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    KBBrief:
+      properties:
+        kb_id:
+          type: string
+          title: Kb Id
+        display_name:
+          type: string
+          title: Display Name
+        storage_quota_mb:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Storage Quota Mb
+        storage_used_mb:
+          type: number
+          title: Storage Used Mb
+        document_count:
+          type: integer
+          title: Document Count
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+      type: object
+      required:
+      - kb_id
+      - display_name
+      - storage_quota_mb
+      - storage_used_mb
+      - document_count
+      - created_at
+      title: KBBrief
+      description: Item in GET /v1/onyx/kb list response.
+    KBDetail:
+      properties:
+        kb_id:
+          type: string
+          title: Kb Id
+        display_name:
+          type: string
+          title: Display Name
+        storage_quota_mb:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Storage Quota Mb
+        storage_used_mb:
+          type: number
+          title: Storage Used Mb
+        document_count:
+          type: integer
+          title: Document Count
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        onyx_workspace_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Onyx Workspace Id
+        onyx_owner_user_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Onyx Owner User Id
+      type: object
+      required:
+      - kb_id
+      - display_name
+      - storage_quota_mb
+      - storage_used_mb
+      - document_count
+      - created_at
+      title: KBDetail
+      description: Response for POST /v1/onyx/kb (201) and GET /v1/onyx/kb/{kb_id}
+        (200).
+    KBListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/KBBrief'
+          type: array
+          title: Items
+        next_cursor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next Cursor
+      type: object
+      required:
+      - items
+      title: KBListResponse
+    KGChunk:
+      properties:
+        id:
+          type: string
+          title: Id
+        content:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Content
+        full_doc_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Full Doc Id
+        chunk_order_index:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Chunk Order Index
+        tokens:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Tokens
+        file_path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: File Path
+      type: object
+      required:
+      - id
+      title: KGChunk
+      description: One chunk row from LightRAG's flat ``lightrag_doc_chunks`` table.
+    KGEdge:
+      properties:
+        source:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source
+        target:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Target
+        type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Type
+        properties:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Properties
+      type: object
+      title: KGEdge
+      description: 'One edge in a graph traversal result.
+
+
+        ``source`` / ``target`` are the LightRAG entity-ID-shaped endpoints
+
+        when available (``properties.source_id`` / ``properties.target_id``)
+
+        and fall back to AGE''s numeric ``start_id`` / ``end_id`` otherwise.
+
+        ``type`` mirrors the cypher edge label.'
+    KGEntity:
+      properties:
+        id:
+          type: string
+          title: Id
+        entity_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Entity Name
+        entity_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Entity Type
+        content:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Content
+        file_path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: File Path
+        properties:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Properties
+      type: object
+      required:
+      - id
+      title: KGEntity
+      description: 'One entity row from LightRAG''s flat ``lightrag_vdb_entity`` table.
+
+
+        Mirrors the slice the client cares about. ``properties`` is reserved
+
+        for future enrichment from the AGE graph layer (Task 3.4) — the flat
+
+        VDB row alone doesn''t carry typed properties, so it is ``None`` today.'
+    KGEntityListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/KGEntity'
+          type: array
+          title: Items
+        next_cursor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next Cursor
+      type: object
+      required:
+      - items
+      title: KGEntityListResponse
+      description: Cursor-paginated list of entities scoped to the caller's tenant.
+    KGNode:
+      properties:
+        id:
+          type: string
+          title: Id
+        label:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Label
+        properties:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Properties
+      type: object
+      required:
+      - id
+      title: KGNode
+      description: 'One node in a graph traversal result.
+
+
+        ``label`` is AGE''s vertex label (e.g. ``base``) or the LightRAG
+
+        ``entity_type`` when available; ``properties`` is the verbatim
+
+        ``properties`` dict the cypher layer surfaces. Both are ``None`` when
+
+        the underlying agtype payload didn''t carry them.'
+    KGRelation:
+      properties:
+        id:
+          type: string
+          title: Id
+        source_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Id
+        target_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Target Id
+        type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Type
+        content:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Content
+        file_path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: File Path
+      type: object
+      required:
+      - id
+      title: KGRelation
+      description: 'One relation row from LightRAG''s flat ``lightrag_vdb_relation``
+        table.
+
+
+        LightRAG stores entity *names* (not surrogate keys) in
+
+        ``source_id`` / ``target_id``; the names are surfaced verbatim.'
+    KGRelationListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/KGRelation'
+          type: array
+          title: Items
+        next_cursor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next Cursor
+      type: object
+      required:
+      - items
+      title: KGRelationListResponse
+      description: Cursor-paginated list of relations scoped to the caller's tenant.
+    KGStats:
+      properties:
+        entities:
+          type: integer
+          title: Entities
+        relations:
+          type: integer
+          title: Relations
+        chunks:
+          type: integer
+          title: Chunks
+      type: object
+      required:
+      - entities
+      - relations
+      - chunks
+      title: KGStats
+      description: Per-tenant counts surfaced by ``GET /v1/kg/stats``.
+    KGSubgraphResponse:
+      properties:
+        nodes:
+          items:
+            $ref: '#/components/schemas/KGNode'
+          type: array
+          title: Nodes
+        edges:
+          items:
+            $ref: '#/components/schemas/KGEdge'
+          type: array
+          title: Edges
+      type: object
+      required:
+      - nodes
+      - edges
+      title: KGSubgraphResponse
+      description: 'Response body for ``/v1/kg/entities/{id}/neighbors`` and ``/subgraph``.
+
+
+        Nodes are de-duplicated by id; edges by ``(source, target, type)``.
+
+        Both lists may be empty when the underlying graph is missing or AGE
+
+        is not installed — see :func:`rag_service.kg.graph._run_traversal`.'
+    OnyxDocumentListItem:
+      properties:
+        document_id:
+          type: string
+          title: Document Id
+        file_name:
+          type: string
+          title: File Name
+        file_size:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: File Size
+        content_hash:
+          type: string
+          title: Content Hash
+        mime_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mime Type
+        status:
+          type: string
+          title: Status
+        uploaded_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Uploaded At
+        indexed_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Indexed At
+        error_message:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error Message
+      type: object
+      required:
+      - document_id
+      - file_name
+      - file_size
+      - content_hash
+      - mime_type
+      - status
+      - uploaded_at
+      - indexed_at
+      title: OnyxDocumentListItem
+      description: One row in the document list / detail view for a KB.
+    OnyxDocumentListResponse:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/OnyxDocumentListItem'
+          type: array
+          title: Items
+        next_cursor:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Next Cursor
+      type: object
+      required:
+      - items
+      title: OnyxDocumentListResponse
+      description: 'Response body for ``GET /v1/onyx/documents``.
+
+
+        ``next_cursor`` is an opaque base64-encoded
+
+        ``(uploaded_at, document_id)`` keyset cursor; clients pass it back
+
+        verbatim in the ``cursor`` query param. ``None`` means "no more
+
+        pages".'
+    OnyxDocumentResponse:
+      properties:
+        document_id:
+          type: string
+          title: Document Id
+        job_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Job Id
+        status:
+          type: string
+          title: Status
+        deduplicated:
+          type: boolean
+          title: Deduplicated
+        file_name:
+          type: string
+          title: File Name
+        file_size:
+          type: integer
+          title: File Size
+        content_hash:
+          type: string
+          title: Content Hash
+        mime_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Mime Type
+      type: object
+      required:
+      - document_id
+      - job_id
+      - status
+      - deduplicated
+      - file_name
+      - file_size
+      - content_hash
+      title: OnyxDocumentResponse
+      description: 'Response body for ``POST /v1/onyx/documents`` (multipart upload).
+
+
+        Mirrors the alpha :class:`IngestResponse` shape with a few extra
+
+        convenience fields the ONYX-side client wants (file_name / size /
+
+        hash / mime) so it doesn''t have to round-trip a follow-up GET.'
+    OnyxHistoryMessage:
+      properties:
+        role:
+          type: string
+          title: Role
+        content:
+          type: string
+          title: Content
+      type: object
+      required:
+      - role
+      - content
+      title: OnyxHistoryMessage
+      description: 'One turn of conversation history forwarded by ONYX in the request
+        body.
+
+
+        ``role`` is conventionally ``"user"`` or ``"assistant"``; we don''t
+
+        constrain the value because LightRAG passes the list through verbatim
+
+        and any normalisation belongs at the upstream side.'
+    OnyxJobResponse:
+      properties:
+        job_id:
+          type: string
+          title: Job Id
+        document_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Document Id
+        job_type:
+          type: string
+          title: Job Type
+        status:
+          type: string
+          title: Status
+        progress:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Progress
+        error_message:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error Message
+        created_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Created At
+        started_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Started At
+        finished_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Finished At
+        retries:
+          type: integer
+          title: Retries
+          default: 0
+      type: object
+      required:
+      - job_id
+      - document_id
+      - job_type
+      - status
+      - created_at
+      title: OnyxJobResponse
+      description: Mirrors α's JobResponse but renamed to keep the onyx schema namespace.
+    OnyxQueryRequest:
+      properties:
+        question:
+          type: string
+          maxLength: 4000
+          minLength: 1
+          title: Question
+        history:
+          items:
+            $ref: '#/components/schemas/OnyxHistoryMessage'
+          type: array
+          maxItems: 50
+          title: History
+        mode:
+          type: string
+          title: Mode
+          default: hybrid
+        top_k:
+          type: integer
+          maximum: 50.0
+          minimum: 1.0
+          title: Top K
+          default: 10
+        vlm_enhanced:
+          type: boolean
+          title: Vlm Enhanced
+          default: false
+        include_sources:
+          type: boolean
+          title: Include Sources
+          default: true
+        max_history_turns:
+          type: integer
+          maximum: 20.0
+          minimum: 0.0
+          title: Max History Turns
+          default: 5
+      type: object
+      required:
+      - question
+      title: OnyxQueryRequest
+      description: 'Request body for ``POST /v1/onyx/query`` and ``/v1/onyx/query/sync``.
+
+
+        ONYX is the source of truth for chat history; we accept it in the
+
+        body and never persist it. ``max_history_turns`` controls how many
+
+        of the trailing messages are forwarded to RAGAnything — defaults to
+
+        five so the prompt budget stays predictable across tenants.'
+    OnyxQuerySource:
+      properties:
+        document_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Document Id
+        file_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: File Name
+        chunk_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Chunk Id
+        score:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Score
+        snippet:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Snippet
+        modality:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Modality
+        page:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Page
+        bbox:
+          anyOf:
+          - items:
+              type: number
+            type: array
+          - type: 'null'
+          title: Bbox
+      type: object
+      title: OnyxQuerySource
+      description: 'One retrieved chunk surfaced in the SSE ``done`` event / sync
+        response.
+
+
+        Mirrors α''s :class:`QuerySource` plus ``page`` / ``bbox`` for clients
+
+        that want to render PDF citations. All fields are optional because
+
+        RAGAnything''s source shape varies by storage backend.'
+    OnyxQuerySyncResponse:
+      properties:
+        request_id:
+          type: string
+          title: Request Id
+        answer:
+          type: string
+          title: Answer
+        sources:
+          items:
+            $ref: '#/components/schemas/OnyxQuerySource'
+          type: array
+          title: Sources
+        latency_ms:
+          type: integer
+          title: Latency Ms
+        tokens:
+          anyOf:
+          - additionalProperties:
+              type: integer
+            type: object
+          - type: 'null'
+          title: Tokens
+        warnings:
+          items:
+            type: string
+          type: array
+          title: Warnings
+      type: object
+      required:
+      - request_id
+      - answer
+      - sources
+      - latency_ms
+      title: OnyxQuerySyncResponse
+      description: Response body for the non-streaming ``/v1/onyx/query/sync`` endpoint.
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
