@@ -35,15 +35,22 @@ from rag_service.api.schemas import (
     AuthTokens,
     LoginRequest,
     MeResponse,
+    RefreshRequest,
+    RefreshResponse,
+    SelectTenantRequest,
+    SelectTenantResponse,
     SignupRequest,
     TenantBrief,
     UserInfo,
 )
 from rag_service.auth.jwt import (
+    blacklist_access,
     create_access_token,
     create_refresh_token,
     decode_token,
     is_access_blacklisted,
+    is_refresh_revoked,
+    revoke_refresh,
 )
 from rag_service.auth.password import hash_password, verify_password
 from rag_service.db.models import Membership, Tenant, User
@@ -223,3 +230,100 @@ async def me(
     """Return the authenticated user's profile + tenant memberships."""
     tenants = await _user_tenants(db, user.user_id)
     return MeResponse(user=UserInfo.model_validate(user), tenants=tenants)
+
+
+@router.post("/refresh", response_model=RefreshResponse)
+async def refresh(
+    req: RefreshRequest,
+    db: AsyncSession = Depends(get_db_session),
+    redis=Depends(get_redis),
+) -> RefreshResponse:
+    """Mint a new access token from a still-valid refresh token.
+
+    The refresh token itself is not rotated — only the short-lived access
+    token is replaced. The caller's first tenant (if any) is reused for the
+    ``tenant`` claim; the dedicated ``select_tenant`` endpoint is the way
+    to switch active tenant.
+    """
+    try:
+        claims = decode_token(req.refresh_token)
+    except Exception:  # noqa: BLE001 — pyjwt error tree, treat all as 401
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid refresh token")
+    if claims.get("type") != "refresh":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "wrong token type")
+    if await is_refresh_revoked(redis, claims.get("jti", "")):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "refresh token revoked")
+
+    try:
+        user_id = uuid.UUID(claims["sub"])
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid refresh token")
+    user = (
+        await db.execute(select(User).where(User.user_id == user_id))
+    ).scalar_one_or_none()
+    if user is None or not user.is_active:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user disabled")
+
+    # Reuse the user's first tenant (if any) for the ``tenant`` claim.
+    tenants = await _user_tenants(db, user_id)
+    first_tenant = tenants[0].tenant_id if tenants else None
+    new_access = create_access_token(user.user_id, first_tenant)
+    return RefreshResponse(access_token=new_access)
+
+
+@router.post("/logout", status_code=204)
+async def logout(
+    authorization: str | None = Header(default=None),
+    refresh_token: str | None = Header(default=None, alias="X-Refresh-Token"),
+    redis=Depends(get_redis),
+) -> None:
+    """Best-effort revocation of the caller's access + refresh tokens.
+
+    Both inputs are optional — if the access token is malformed we still
+    try the refresh, and vice versa. Decoding errors are swallowed: there
+    is nothing meaningful we can do with a token we can't parse, and the
+    blacklist machinery already treats undecodable input as untrusted.
+    """
+    if authorization and authorization.startswith("Bearer "):
+        await blacklist_access(redis, authorization[len("Bearer "):])
+    if refresh_token:
+        try:
+            claims = decode_token(refresh_token)
+            jti = claims.get("jti")
+            if jti:
+                await revoke_refresh(redis, jti)
+        except Exception:  # noqa: BLE001 — best-effort, see docstring
+            pass
+    return None  # 204
+
+
+@router.post("/select_tenant", response_model=SelectTenantResponse)
+async def select_tenant(
+    req: SelectTenantRequest,
+    user: User = Depends(_current_user),
+    db: AsyncSession = Depends(get_db_session),
+) -> SelectTenantResponse:
+    """Switch the active tenant on the caller's session.
+
+    Validates that the caller is a member of ``req.tenant_id`` (any role)
+    and mints a fresh access token whose ``tenant`` claim points at it.
+    Non-members get 403, not 404 — we do not reveal whether the tenant
+    exists.
+    """
+    membership = (
+        await db.execute(
+            select(Membership).where(
+                Membership.user_id == user.user_id,
+                Membership.tenant_id == req.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if membership is None:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "not a member of that tenant"
+        )
+
+    new_access = create_access_token(user.user_id, req.tenant_id)
+    return SelectTenantResponse(
+        access_token=new_access, tenant_id=req.tenant_id
+    )

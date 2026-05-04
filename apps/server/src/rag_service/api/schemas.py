@@ -231,3 +231,50 @@ class MeResponse(BaseModel):
 
     user: UserInfo
     tenants: list[TenantBrief]
+
+
+# ---------------------------------------------------------------------------
+# Auth (Task 2.5) — refresh / logout / select_tenant
+# ---------------------------------------------------------------------------
+
+
+class RefreshRequest(BaseModel):
+    """Request body for ``POST /v1/auth/refresh``.
+
+    The refresh token is sent in the body (rather than a header) so it can
+    travel inside an HTTPS body and never leak via an access log.
+    """
+
+    refresh_token: str
+
+
+class RefreshResponse(BaseModel):
+    """Response body for ``POST /v1/auth/refresh``.
+
+    Only the access token is rotated — the caller keeps using the same
+    refresh token until it expires or the user logs out.
+    """
+
+    access_token: str
+
+
+class SelectTenantRequest(BaseModel):
+    """Request body for ``POST /v1/auth/select_tenant``.
+
+    Switches the *active* tenant for the caller's session by minting a new
+    access token with the chosen ``tenant`` claim. The caller must be a
+    member of the requested tenant; non-members get a 403.
+    """
+
+    tenant_id: str
+
+
+class SelectTenantResponse(BaseModel):
+    """Response body for ``POST /v1/auth/select_tenant``.
+
+    The new access token carries ``tenant=<tenant_id>`` so subsequent
+    requests are scoped to the selected tenant.
+    """
+
+    access_token: str
+    tenant_id: str
