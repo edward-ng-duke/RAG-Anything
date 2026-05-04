@@ -21,11 +21,13 @@ so tests can monkeypatch them without standing up a real database.
 from __future__ import annotations
 
 import datetime as _dt
+import shutil
+from pathlib import Path
 from typing import Any
 
 import httpx
 import redis.asyncio as aioredis
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_service.core import paths as _paths
@@ -332,3 +334,213 @@ async def _ingest_under_lock(
         pass
 
     return {"status": "indexed"}
+
+
+# ---------------------------------------------------------------------------
+# Rebuild-index task
+# ---------------------------------------------------------------------------
+
+
+def _remove_dir_safely(path: Path) -> None:
+    """``shutil.rmtree`` ``path`` if it exists; tolerate missing path.
+
+    A small wrapper so callers don't have to special-case "already gone".
+    Any non-FileNotFoundError exception is re-raised — we only swallow the
+    "nothing to do" case.
+    """
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+
+
+async def _purge_deleted_documents(
+    session: AsyncSession, tenant_id: str
+) -> int:
+    """Permanently remove documents marked ``status='deleted'`` for ``tenant_id``.
+
+    Returns the count of rows removed (informational; not load-bearing).
+    """
+    stmt = delete(_models.Document).where(
+        _models.Document.tenant_id == tenant_id,
+        _models.Document.status == "deleted",
+    )
+    result = await session.execute(stmt)
+    # ``rowcount`` may be -1 on backends that don't report it; coerce to 0.
+    return max(0, getattr(result, "rowcount", 0) or 0)
+
+
+async def _list_rebuildable_documents(
+    session: AsyncSession, tenant_id: str
+) -> list[dict[str, Any]]:
+    """Return ``[{document_id, storage_path}]`` for docs to re-process.
+
+    Includes ``status IN ('indexed', 'failed')`` — failed docs are retried as
+    a side-benefit of a full rebuild. Soft-deleted rows have already been
+    purged by :func:`_purge_deleted_documents`.
+    """
+    stmt = select(
+        _models.Document.document_id, _models.Document.storage_path
+    ).where(
+        _models.Document.tenant_id == tenant_id,
+        _models.Document.status.in_(("indexed", "failed")),
+    )
+    rows = (await session.execute(stmt)).all()
+    return [
+        {"document_id": str(row[0]), "storage_path": row[1]} for row in rows
+    ]
+
+
+async def _mark_rebuild_job_failed(
+    session: AsyncSession,
+    tenant_id: str,
+    error_message: str,
+) -> None:
+    """Mark the most recent ``running`` rebuild job for ``tenant_id`` failed.
+
+    Tolerant of "no row" — not every caller registers a jobs row up front
+    (the API may schedule the rebuild without one in some flows).
+    """
+    now = _dt.datetime.now(_dt.timezone.utc)
+    stmt = (
+        update(_models.Job)
+        .where(
+            _models.Job.tenant_id == tenant_id,
+            _models.Job.job_type == "rebuild",
+            _models.Job.status.in_(("queued", "running")),
+        )
+        .values(status="failed", finished_at=now, error_message=error_message)
+    )
+    await session.execute(stmt)
+
+
+async def rebuild_index(
+    ctx: dict[str, Any],
+    tenant_id: str,
+) -> dict[str, Any]:
+    """Arq task: full rebuild of a tenant's LightRAG working dir.
+
+    Flow:
+
+    1. Acquire :func:`tenant_ingest_lock` with a longer TTL (3600s) so a
+       lengthy rebuild doesn't lose its lock mid-flight; ``acquire_timeout=0``
+       keeps us fail-fast on contention (arq retries the job).
+    2. Move the existing working_dir to ``<working_dir>.bak`` if no backup
+       already exists; otherwise resume from the prior attempt.
+    3. Permanently delete soft-deleted document rows.
+    4. Evict the cached ``RAGAnything`` so the next ``.get(tenant_id)``
+       builds against the now-empty working_dir.
+    5. Iterate every remaining document; per-doc failures mark that document
+       ``failed`` but do **not** abort the rebuild — surviving documents
+       still get re-indexed.
+    6. On overall success: ``rmtree`` the backup. On any fatal exception:
+       leave the backup for human recovery and re-raise.
+
+    Parameters
+    ----------
+    ctx:
+        Arq job context. Must contain a ``redis`` async client under
+        ``ctx["redis"]``.
+    tenant_id:
+        Validated tenant identifier.
+
+    Returns
+    -------
+    dict
+        ``{"status": "rebuilt", "indexed": int, "failed": int, "purged": int}``
+        — informational only; the documents/jobs tables are state-of-record.
+
+    Raises
+    ------
+    LockBusy
+        If another ingest/rebuild is already holding the per-tenant lock.
+    Exception
+        Any fatal (non per-document) failure is re-raised after marking the
+        rebuild job ``failed`` and leaving the backup dir intact.
+    """
+    redis: aioredis.Redis = ctx["redis"]
+
+    async with tenant_ingest_lock(
+        redis, tenant_id, ttl=3600, acquire_timeout=0
+    ):
+        return await _rebuild_under_lock(redis, tenant_id)
+
+
+async def _rebuild_under_lock(
+    redis: aioredis.Redis,
+    tenant_id: str,
+) -> dict[str, Any]:
+    """Body of :func:`rebuild_index` once the tenant lock is held."""
+    working_dir = _paths.tenant_working_dir(tenant_id)
+    bak_dir = working_dir.parent / f"{working_dir.name}.bak"
+
+    # 1) Idempotent backup. If a prior attempt already moved the original
+    # working_dir to ``.bak`` we treat this run as a resume — don't overwrite
+    # the backup (that'd lose the only copy of the originals if we crash).
+    if not bak_dir.exists():
+        if working_dir.exists():
+            shutil.move(str(working_dir), str(bak_dir))
+    # In every case make sure we hand the rebuild a fresh, empty dir.
+    working_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2) Purge soft-deleted documents and snapshot the rebuild cohort.
+    async with _open_session() as session:
+        purged = await _purge_deleted_documents(session, tenant_id)
+        documents = await _list_rebuildable_documents(session, tenant_id)
+
+    # 3) Evict any cached RAGAnything BEFORE we touch storages — the next
+    # .get() will rebuild against the empty working_dir.
+    cache = rag_factory.get_cache()
+    await cache.evict(tenant_id)
+
+    # 4) Re-process every doc. Per-doc failures don't abort the run.
+    indexed = 0
+    failed = 0
+    try:
+        rag = await cache.get(tenant_id)
+        for doc in documents:
+            document_id = doc["document_id"]
+            storage_path = doc["storage_path"]
+            output_dir = working_dir / "mineru" / document_id
+            output_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                await rag.process_document_complete(
+                    file_path=storage_path, output_dir=str(output_dir)
+                )
+            except Exception as exc:  # noqa: BLE001 — recorded per-doc, continue
+                failed += 1
+                async with _open_session() as session:
+                    await _mark_document_failed(
+                        session, tenant_id, document_id, error_message=str(exc)
+                    )
+                continue
+            indexed += 1
+            async with _open_session() as session:
+                await _mark_document_indexed(session, tenant_id, document_id)
+    except BaseException as exc:
+        # Fatal (non per-doc) failure: leave .bak in place for human
+        # recovery, mark a rebuild job row failed, and re-raise.
+        async with _open_session() as session:
+            await _mark_rebuild_job_failed(
+                session, tenant_id, error_message=str(exc)
+            )
+        raise
+
+    # 5) Best-effort reload notify if anything actually got re-indexed.
+    if indexed > 0:
+        try:
+            await redis.publish(f"tenant_reload:{tenant_id}", "1")
+        except Exception:
+            pass
+
+    # 6) Happy path — drop the backup. Only do this on overall success;
+    # the rmtree is intentionally inside _remove_dir_safely so a missing
+    # bak_dir (e.g. an empty tenant) doesn't tank the rebuild.
+    _remove_dir_safely(bak_dir)
+
+    return {
+        "status": "rebuilt",
+        "indexed": indexed,
+        "failed": failed,
+        "purged": purged,
+    }
