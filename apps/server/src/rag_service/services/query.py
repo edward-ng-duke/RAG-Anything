@@ -35,7 +35,7 @@ from typing import Any
 
 import httpx
 
-from rag_service.api.routers.query import _coerce_source, _normalise_result  # noqa: F401
+from rag_service.api.routers.query import _normalise_result
 
 _log = logging.getLogger(__name__)
 

@@ -34,6 +34,7 @@ os.environ.setdefault("EMBEDDING_API_KEY", "x")
 os.environ.setdefault("EMBEDDING_MODEL", "e")
 os.environ.setdefault("DATA_DIR", "/tmp/rag_onyx_query_test")
 
+import asyncio  # noqa: E402
 import json  # noqa: E402
 from typing import Any  # noqa: E402
 
@@ -546,3 +547,92 @@ async def test_query_request_top_k_out_of_range_returns_422():
         )
     assert r1.status_code == 422
     assert r2.status_code == 422
+
+
+# ===========================================================================
+# Regression: heartbeat must not cancel an in-flight aquery
+# ===========================================================================
+
+
+async def test_query_sse_heartbeat_does_not_cancel_slow_aquery(monkeypatch):
+    """A slow ``aquery`` (longer than several heartbeat ticks) must complete.
+
+    Reproduction of the bug fixed in this commit: the original
+    implementation wrapped ``agen.__anext__()`` in
+    ``asyncio.wait_for(..., timeout=15)``. When the timeout fired while
+    the upstream generator was suspended inside ``rag.aquery(...)``,
+    ``wait_for`` cancelled the underlying coroutine and the
+    CancelledError bubbled into the in-flight LLM call, killing it. Any
+    query slower than ``HEARTBEAT_INTERVAL_SEC`` would therefore abort.
+
+    The fix splits driver and consumer: a producer task pumps events
+    into an ``asyncio.Queue``; the consumer's ``wait_for`` only ever
+    times out the ``queue.get()``, so heartbeats never propagate
+    cancellation upstream.
+
+    Test strategy: shrink ``HEARTBEAT_INTERVAL_SEC`` to 0.05s so the
+    heartbeat fires several times during a 0.3s ``aquery`` block. With
+    the bug we'd see meta + (possibly) error and never a ``done``;
+    with the fix we see meta + chunk + done plus at least one
+    ``: keepalive`` comment line in the raw body.
+    """
+    # Shrink the heartbeat to a few ticks per second so this test runs
+    # quickly while still exercising multiple keepalive emissions.
+    monkeypatch.setattr(
+        "rag_service.api.routers.onyx_query.HEARTBEAT_INTERVAL_SEC", 0.05
+    )
+
+    aquery_started = asyncio.Event()
+    aquery_can_finish = asyncio.Event()
+
+    class SlowRag:
+        async def aquery(self, q: str, **kwargs: Any) -> Any:  # noqa: ARG002
+            aquery_started.set()
+            await aquery_can_finish.wait()
+            return {"answer": "done", "sources": []}
+
+        async def aquery_vlm_enhanced(self, q: str, **kwargs: Any) -> Any:
+            return await self.aquery(q, **kwargs)
+
+    rag = SlowRag()
+    # ``_build_app`` is duck-typed; SlowRag duck-types as FakeRag.
+    app, _cache = _build_app(rag)  # type: ignore[arg-type]
+
+    async def _release():
+        # Once aquery has started, sleep long enough for the heartbeat
+        # ticker to fire several times (0.3s at a 0.05s interval ≈ 6
+        # ticks of opportunity), then unblock the upstream call.
+        await aquery_started.wait()
+        await asyncio.sleep(0.3)
+        aquery_can_finish.set()
+
+    release_task = asyncio.create_task(_release())
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as ac:
+            r = await ac.post(
+                "/v1/onyx/query",
+                json={"question": "slow?"},
+                headers={"Authorization": f"Bearer {_TOKEN}"},
+            )
+    finally:
+        # Ensure the release helper is awaited regardless of test outcome.
+        if not release_task.done():
+            release_task.cancel()
+            try:
+                await release_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    assert r.status_code == 200, r.text
+    raw = r.text
+
+    # With the fix: at least one keepalive comment must appear (proves
+    # the heartbeat fired) AND a ``done`` event must terminate the
+    # stream (proves the aquery completed despite the heartbeats).
+    assert ": keepalive" in raw, raw
+    frames = [f for f in _parse_sse(raw) if f[0] is not None]
+    events = [f[0] for f in frames]
+    assert "done" in events, events
+    # And no ``error`` event leaked from a cancelled aquery.
+    assert "error" not in events, events

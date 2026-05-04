@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -73,33 +74,69 @@ async def query_stream(
     history_dicts = [m.model_dump() for m in body.history]
 
     async def gen():
-        # Drive the upstream event generator with an interleaved
-        # heartbeat: every ``HEARTBEAT_INTERVAL_SEC`` of silence emits
-        # a comment frame. Comments don't surface as events on the
-        # consumer side; they only keep the TCP connection warm.
-        agen = iter_query_events(
-            rag=rag,
-            request_id=ctx.request_id,
-            kb_id=ctx.kb_id,
-            question=body.question,
-            history=history_dicts,
-            mode=body.mode,
-            top_k=body.top_k,
-            vlm_enhanced=body.vlm_enhanced,
-            include_sources=body.include_sources,
-            max_history_turns=body.max_history_turns,
-        )
+        # Producer/consumer split: a background task drives the upstream
+        # event generator and pushes events into a queue; this consumer
+        # only ever waits on ``queue.get()`` with a heartbeat timeout.
+        #
+        # The naive ``asyncio.wait_for(agen.__anext__(), timeout=15)``
+        # design cancels the *underlying* coroutine on timeout — and if
+        # the upstream generator is suspended inside ``rag.aquery(...)``
+        # at the moment the heartbeat fires, that CancelledError
+        # propagates into the in-flight LLM call and aborts it. Every
+        # 15s tick would kill any long query. Pumping through a queue
+        # decouples the two: the producer runs to completion regardless
+        # of how many heartbeats we emit on the consumer side.
+        queue: asyncio.Queue = asyncio.Queue()
+        SENTINEL = object()
+
+        async def producer():
+            try:
+                async for event_name, payload in iter_query_events(
+                    rag=rag,
+                    request_id=ctx.request_id,
+                    kb_id=ctx.kb_id,
+                    question=body.question,
+                    history=history_dicts,
+                    mode=body.mode,
+                    top_k=body.top_k,
+                    vlm_enhanced=body.vlm_enhanced,
+                    include_sources=body.include_sources,
+                    max_history_turns=body.max_history_turns,
+                ):
+                    await queue.put((event_name, payload))
+            except Exception as e:  # noqa: BLE001
+                # Belt-and-braces: iter_query_events already converts
+                # its own raises into ``error`` events, but if anything
+                # leaks (e.g. cancellation from client disconnect)
+                # surface it as one trailing error frame rather than
+                # tearing the whole response down silently.
+                _log.exception("onyx stream producer crashed")
+                await queue.put(
+                    (
+                        "error",
+                        {
+                            "code": "internal_error",
+                            "message": f"query failed: {type(e).__name__}",
+                            "retryable": False,
+                        },
+                    )
+                )
+            finally:
+                await queue.put(SENTINEL)
+
+        task = asyncio.create_task(producer())
         try:
             while True:
                 try:
-                    event_name, payload = await asyncio.wait_for(
-                        agen.__anext__(), timeout=HEARTBEAT_INTERVAL_SEC
+                    item = await asyncio.wait_for(
+                        queue.get(), timeout=HEARTBEAT_INTERVAL_SEC
                     )
                 except asyncio.TimeoutError:
                     yield b": keepalive\n\n"
                     continue
-                except StopAsyncIteration:
+                if item is SENTINEL:
                     break
+                event_name, payload = item
                 yield _to_sse(event_name, payload)
                 if event_name == "done":
                     # Best-effort analytics write — never fail the request.
@@ -118,7 +155,12 @@ async def query_stream(
                 if event_name == "error":
                     break
         finally:
-            await agen.aclose()
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
 
     headers = {
         "Cache-Control": "no-cache",
@@ -162,10 +204,7 @@ async def query_sync(
     except Exception as e:  # noqa: BLE001
         _log.exception("RAGAnything query failed in onyx /query/sync")
         # Treat upstream HTTP errors as 502; everything else as 500.
-        # We pattern-match on class name to avoid a hard dependency on
-        # httpx in this file (the import already exists transitively
-        # via the service).
-        if e.__class__.__name__ == "HTTPStatusError":
+        if isinstance(e, httpx.HTTPStatusError):
             raise HTTPException(
                 status.HTTP_502_BAD_GATEWAY, "upstream model error"
             )
