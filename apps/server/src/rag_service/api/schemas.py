@@ -99,3 +99,52 @@ class DocumentListResponse(BaseModel):
 
     items: list[DocumentResponse]
     next_cursor: str | None
+
+
+class QueryRequest(BaseModel):
+    """Request body for ``POST /v1/query``.
+
+    ``mode`` selects LightRAG's retrieval strategy
+    (``hybrid`` | ``local`` | ``global`` | ``naive`` | ``mix``); the router
+    forwards the value verbatim and lets RAGAnything reject anything it does
+    not recognise. ``vlm_enhanced`` toggles the multimodal-aware variant
+    (``aquery_vlm_enhanced``) for tenants that have a VLM configured.
+    """
+
+    question: str
+    mode: str = "hybrid"  # hybrid|local|global|naive|mix
+    top_k: int = 10
+    vlm_enhanced: bool = False
+
+
+class QuerySource(BaseModel):
+    """One retrieved chunk that contributed to the answer.
+
+    Every field is optional because RAGAnything's source format varies by
+    storage backend and retrieval mode — we surface what is present and
+    leave gaps as ``None`` rather than synthesising values. ``modality``
+    is one of ``text`` / ``image`` / ``table`` / ``equation`` for clients
+    that want to render multimodal sources differently.
+    """
+
+    document_id: str | None = None
+    file_name: str | None = None
+    chunk_id: str | None = None
+    score: float | None = None
+    snippet: str | None = None
+    modality: str | None = None  # text|image|table|equation
+
+
+class QueryResponse(BaseModel):
+    """Response body for ``POST /v1/query``.
+
+    ``latency_ms`` measures wall-clock time spent in the RAG call (not the
+    full request round-trip). ``tokens`` is whatever RAGAnything's result
+    surfaced — typically ``{"in": int, "out": int, "cost_usd": float}`` —
+    or ``None`` when the underlying provider didn't return usage info.
+    """
+
+    answer: str
+    sources: list[QuerySource]
+    latency_ms: int
+    tokens: dict | None = None  # {"in": int, "out": int, "cost_usd": float}
