@@ -36,8 +36,8 @@ from pathlib import Path
 
 from arq import create_pool
 from arq.connections import RedisSettings
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rag_service.api.deps import current_tenant
@@ -190,13 +190,73 @@ async def enqueue_ingest(tenant_id: str, document_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _enforce_storage_quota(
+    db: AsyncSession,
+    tenant_id: str,
+    incoming_bytes: int,
+) -> None:
+    """Raise 413 if the tenant's used storage + ``incoming_bytes`` would exceed the quota.
+
+    The quota is sourced from ``tenants.storage_quota_mb`` with a 1 GiB
+    default for tenants where the column happens to be NULL (matches the
+    server-default in the schema). The ``used`` aggregate excludes rows
+    in the ``"deleted"`` status so soft-deleted documents don't count
+    against the live quota — same predicate ``GET /v1/tenants/me`` uses.
+
+    ``incoming_bytes`` is the client-declared ``Content-Length``; it can
+    be a lower bound (chunked uploads omit it) but it's the only signal
+    we have *before* draining the body. The post-write ``max_upload_mb``
+    cap stays in place as a hard ceiling for clients that lie or stream.
+    """
+    quota_mb = (
+        await db.execute(
+            select(_models.Tenant.storage_quota_mb).where(
+                _models.Tenant.tenant_id == tenant_id
+            )
+        )
+    ).scalar_one_or_none()
+    if quota_mb is None:
+        # Either the tenant row is missing (defensive — auth normally
+        # rejects this) or the column is NULL. Use the same default as
+        # the schema's server_default ("1024" MB) so behaviour is
+        # consistent with freshly-created tenants.
+        quota_mb = 1024
+    quota_bytes = quota_mb * 1024 * 1024
+
+    used = (
+        await db.execute(
+            select(func.coalesce(func.sum(_models.Document.file_size), 0)).where(
+                _models.Document.tenant_id == tenant_id,
+                _models.Document.status != "deleted",
+            )
+        )
+    ).scalar_one()
+
+    if used + incoming_bytes > quota_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"storage quota exceeded ({quota_mb} MB)",
+        )
+
+
 @router.post("/ingest", response_model=IngestResponse)
 async def ingest(
+    request: Request,
     file: UploadFile = File(...),
     tenant_id: str = Depends(current_tenant),
     db: AsyncSession = Depends(get_db_session),
 ) -> IngestResponse:
     """Accept a multipart upload, persist + dedupe + enqueue ingest job."""
+    # Pre-check the tenant's storage quota *before* we drain the body to
+    # disk. Uses Content-Length as a lower bound; chunked transfers fall
+    # through to the post-write size cap. ``int(... or 0)`` is safe: a
+    # missing or non-numeric header behaves as "no signal".
+    try:
+        incoming = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        incoming = 0
+    await _enforce_storage_quota(db, tenant_id, incoming)
+
     # Pick the on-disk extension from the client filename when possible —
     # it's only a hint; the authoritative extension comes from the magic
     # bytes we sniff after writing. A missing/odd extension defaults to

@@ -6,6 +6,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from rag_service.api.rate_limit import RateLimitMiddleware
 from rag_service.api.routers.conversations import router as conversations_router
 from rag_service.api.routers.health import router as health_router
 from rag_service.api.routers.ingest import router as ingest_router
@@ -17,6 +18,8 @@ from rag_service.api.routers.tenants import router as tenants_router
 from rag_service.observability.metrics import metrics_router
 from rag_service.observability.logging import configure_logging, request_id_var, tenant_id_var
 from rag_service.config import settings
+
+import redis.asyncio as aioredis_mw
 
 
 @asynccontextmanager
@@ -72,6 +75,16 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+
+    # Rate limiting (sliding window, Redis-backed). ``aioredis.from_url``
+    # returns an unconnected pool — no I/O happens until the first request
+    # hits the middleware, so installing it during create_app() can't fail
+    # even when Redis is briefly unavailable. The middleware itself fails
+    # open if Redis errors at request time.
+    app.add_middleware(
+        RateLimitMiddleware,
+        redis=aioredis_mw.from_url(settings.redis_url, decode_responses=False),
     )
 
     # Request-ID middleware

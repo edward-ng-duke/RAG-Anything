@@ -54,28 +54,58 @@ from rag_service.api.routers import ingest as ingest_mod  # noqa: E402
 
 
 class _FakeResult:
-    """Mimic the slice of ``Result`` we use: ``.first()``."""
+    """Mimic the slice of ``Result`` we use across the ingest router.
 
-    def __init__(self, row: Any | None) -> None:
+    ``.first()`` is what the dedup branch wants (a ``Row``-ish tuple);
+    ``.scalar_one()`` and ``.scalar_one_or_none()`` are what the
+    quota-check helper wants (a single column value). The fake stores
+    one "row" per result so callers can pick the right access pattern.
+    """
+
+    def __init__(self, row: Any | None, scalar: Any | None = None) -> None:
         self._row = row
+        self._scalar = scalar if scalar is not None else (
+            row[0] if isinstance(row, tuple) and row else row
+        )
 
     def first(self) -> Any | None:
         return self._row
+
+    def scalar_one(self) -> Any:
+        return self._scalar
+
+    def scalar_one_or_none(self) -> Any | None:
+        return self._scalar
 
 
 class _FakeSession:
     """Tiny stand-in for an :class:`AsyncSession`.
 
-    Records every ``.add()``-ed object and answers ``execute()`` with a
-    pre-seeded "existing document" row when the SELECT carries a matching
-    ``content_hash`` — otherwise returns an empty result. This is enough
-    to exercise both the fresh-upload and dedup branches.
+    Records every ``.add()``-ed object and answers ``execute()`` against
+    three SELECT shapes the router emits:
+
+    * ``Tenant.storage_quota_mb`` — returns the seeded ``quota_mb``
+      (default 1024 MB, the same as the schema's server_default).
+    * ``func.coalesce(func.sum(Document.file_size), 0)`` — returns the
+      seeded ``used_bytes`` (default 0).
+    * dedup ``Document.document_id WHERE content_hash = ...`` — returns
+      ``(dedup_doc_id,)`` when ``dedup_for_hash`` matches the rendered
+      SQL, else empty.
     """
 
-    def __init__(self, dedup_for_hash: str | None = None, dedup_doc_id: uuid.UUID | None = None) -> None:
+    def __init__(
+        self,
+        dedup_for_hash: str | None = None,
+        dedup_doc_id: uuid.UUID | None = None,
+        *,
+        quota_mb: int | None = 1024,
+        used_bytes: int = 0,
+    ) -> None:
         self.added: list[Any] = []
         self._dedup_for_hash = dedup_for_hash
         self._dedup_doc_id = dedup_doc_id
+        self._quota_mb = quota_mb
+        self._used_bytes = used_bytes
         self.commits = 0
 
     def add(self, obj: Any) -> None:
@@ -95,10 +125,17 @@ class _FakeSession:
         return None
 
     async def execute(self, stmt: Any) -> _FakeResult:
-        # Inspect the compiled SQL crudely: the dedup query filters on
-        # ``content_hash``. If we have a seeded hash AND the rendered SQL
-        # references it, return a hit.
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+
+        # Quota lookup: ``SELECT tenants.storage_quota_mb FROM tenants ...``
+        if "storage_quota_mb" in compiled:
+            return _FakeResult(None, scalar=self._quota_mb)
+
+        # Used-bytes aggregate: ``coalesce(sum(documents.file_size), 0)``
+        if "sum(documents.file_size)" in compiled or "SUM(documents.file_size)" in compiled:
+            return _FakeResult(None, scalar=self._used_bytes)
+
+        # Dedup query: filters on a literal content_hash.
         if (
             self._dedup_for_hash is not None
             and self._dedup_for_hash in compiled
@@ -334,3 +371,41 @@ def test_ingest_missing_tenant_400(tmp_data_dir, monkeypatch):
     )
     assert r.status_code == 400
     enqueue.assert_not_awaited()
+
+
+def test_ingest_quota_exceeded_returns_413(tmp_data_dir, monkeypatch):
+    """A tenant near its storage_quota_mb gets 413 before the body is even drained.
+
+    Seeds the fake session with quota=1 MB and used_bytes ≈ the limit so
+    even a tiny incoming Content-Length pushes the tenant over the cap.
+    The router must reject with 413, must NOT enqueue, and must NOT add
+    any rows to the session.
+    """
+    quota_mb = 1
+    quota_bytes = quota_mb * 1024 * 1024
+    # Already used: quota minus a sliver. The incoming PDF body's
+    # Content-Length is far larger than the sliver, so the pre-check
+    # trips immediately.
+    used_bytes = quota_bytes - 100
+
+    session = _FakeSession(quota_mb=quota_mb, used_bytes=used_bytes)
+    enqueue = AsyncMock(return_value=None)
+    app = _make_app(session, enqueue, monkeypatch)
+
+    # Body is a few KB of PDF — enough that Content-Length on the
+    # multipart envelope blows past the remaining 100 byte budget.
+    pdf_bytes = b"%PDF-1.4\n" + b"a" * 4096
+    client = TestClient(app)
+    r = client.post(
+        "/v1/ingest",
+        files={"file": ("over.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+    )
+
+    assert r.status_code == 413, r.text
+    assert "quota" in r.json()["detail"].lower()
+    enqueue.assert_not_awaited()
+    assert session.added == []
+    # No file should have been written either — the quota check runs
+    # before _stream_to_disk.
+    uploads = list((tmp_data_dir / "uploads" / "tnt-1").glob("*"))
+    assert uploads == []
