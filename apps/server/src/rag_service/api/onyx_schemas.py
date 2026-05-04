@@ -50,3 +50,51 @@ class KBDetail(BaseModel):
     created_at: datetime
     onyx_workspace_id: str | None = None
     onyx_owner_user_id: str | None = None
+
+
+# --- Documents (Task 2.2) ---
+
+
+class OnyxDocumentResponse(BaseModel):
+    """Response body for ``POST /v1/onyx/documents`` (multipart upload).
+
+    Mirrors the alpha :class:`IngestResponse` shape with a few extra
+    convenience fields the ONYX-side client wants (file_name / size /
+    hash / mime) so it doesn't have to round-trip a follow-up GET.
+    """
+
+    document_id: str
+    job_id: str | None
+    status: str
+    deduplicated: bool
+    file_name: str
+    file_size: int
+    content_hash: str
+    mime_type: str | None = None
+
+
+class OnyxDocumentListItem(BaseModel):
+    """One row in the document list / detail view for a KB."""
+
+    document_id: str
+    file_name: str
+    file_size: int | None
+    content_hash: str
+    mime_type: str | None
+    status: str
+    uploaded_at: datetime | None
+    indexed_at: datetime | None
+    error_message: str | None = None
+
+
+class OnyxDocumentListResponse(BaseModel):
+    """Response body for ``GET /v1/onyx/documents``.
+
+    ``next_cursor`` is an opaque base64-encoded
+    ``(uploaded_at, document_id)`` keyset cursor; clients pass it back
+    verbatim in the ``cursor`` query param. ``None`` means "no more
+    pages".
+    """
+
+    items: list[OnyxDocumentListItem]
+    next_cursor: str | None = None
