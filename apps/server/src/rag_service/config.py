@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     embedding_base_url: str = Field(..., alias="EMBEDDING_BASE_URL")
     embedding_api_key: str = Field(..., alias="EMBEDDING_API_KEY")
     embedding_model: str = Field(..., alias="EMBEDDING_MODEL")
+    jwt_secret_key: str = Field(..., alias="JWT_SECRET_KEY")
 
     # ---- Optional ----
     vlm_model: str | None = Field(default=None, alias="VLM_MODEL")
@@ -33,6 +34,16 @@ class Settings(BaseSettings):
     data_dir: Path = Field(default=Path("./data"), alias="DATA_DIR")
     max_upload_mb: int = Field(default=1000, alias="MAX_UPLOAD_MB")
     lru_instance_cap: int = Field(default=32, alias="LRU_INSTANCE_CAP")
+    access_token_ttl_min: int = Field(default=15, alias="ACCESS_TOKEN_TTL_MIN")
+    refresh_token_ttl_days: int = Field(default=7, alias="REFRESH_TOKEN_TTL_DAYS")
+
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def _validate_jwt_secret_length(cls, v: str) -> str:
+        """Reject short JWT secrets — HS256 keys must be ≥ 64 chars to be safe."""
+        if not isinstance(v, str) or len(v) < 64:
+            raise ValueError("jwt_secret_key must be at least 64 characters long")
+        return v
 
     model_config = SettingsConfigDict(
         env_file=".env",

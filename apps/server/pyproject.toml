@@ -24,6 +24,7 @@ dependencies = [
     "httpx",
     "bcrypt>=4.0",
     "prometheus-client>=0.17",
+    "pyjwt>=2.8",
 ]
 
 [project.scripts]
