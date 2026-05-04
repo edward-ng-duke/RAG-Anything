@@ -37,12 +37,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from rag_service.api.deps import current_tenant, get_db_session
 from rag_service.api.schemas import (
     KGChunk,
+    KGEdge,
     KGEntity,
     KGEntityListResponse,
+    KGNode,
     KGRelation,
     KGRelationListResponse,
     KGStats,
+    KGSubgraphResponse,
 )
+from rag_service.kg import graph as graph_mod
 from rag_service.kg import repository
 
 router = APIRouter(prefix="/v1/kg", tags=["kg"])
@@ -198,3 +202,53 @@ def _normalize_relation(row: dict) -> dict:
         "content": row.get("content"),
         "file_path": row.get("file_path"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Graph traversal (Task 3.4) — k-hop neighbours / multi-source subgraph
+# ---------------------------------------------------------------------------
+
+
+@router.get("/entities/{entity_id}/neighbors", response_model=KGSubgraphResponse)
+async def get_neighbors(
+    entity_id: str,
+    depth: int = Query(default=1, ge=1, le=3),
+    tenant_id: str = Depends(current_tenant),
+    db: AsyncSession = Depends(get_db_session),
+) -> KGSubgraphResponse:
+    """Return the k-hop neighbourhood of ``entity_id`` as ``{nodes, edges}``.
+
+    ``depth`` is bounded to ``[1, 3]`` — wider traversals on a real KG
+    explode quadratically and we'd rather force the caller to paginate
+    via repeated 1-hop lookups than ship a footgun.
+    """
+    result = await graph_mod.neighbors(db, tenant_id, entity_id, depth=depth)
+    return KGSubgraphResponse(
+        nodes=[KGNode(**n) for n in result["nodes"]],
+        edges=[KGEdge(**e) for e in result["edges"]],
+    )
+
+
+@router.get("/subgraph", response_model=KGSubgraphResponse)
+async def get_subgraph(
+    entities: str = Query(..., description="Comma-separated entity IDs"),
+    depth: int = Query(default=2, ge=1, le=3),
+    tenant_id: str = Depends(current_tenant),
+    db: AsyncSession = Depends(get_db_session),
+) -> KGSubgraphResponse:
+    """Multi-source subgraph rooted at the comma-separated ``entities``.
+
+    Reject empty input and lists longer than 50 IDs explicitly with a
+    400 — the cypher layer would otherwise silently short-circuit or
+    issue an unbounded query.
+    """
+    eids = [e.strip() for e in entities.split(",") if e.strip()]
+    if not eids:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "no entity ids provided")
+    if len(eids) > 50:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "max 50 entity ids")
+    result = await graph_mod.subgraph(db, tenant_id, eids, depth=depth)
+    return KGSubgraphResponse(
+        nodes=[KGNode(**n) for n in result["nodes"]],
+        edges=[KGEdge(**e) for e in result["edges"]],
+    )

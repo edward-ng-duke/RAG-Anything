@@ -347,3 +347,49 @@ class KGStats(BaseModel):
     entities: int
     relations: int
     chunks: int
+
+
+# ---------------------------------------------------------------------------
+# Knowledge graph (Task 3.4) — neighbours / subgraph traversal
+# ---------------------------------------------------------------------------
+
+
+class KGNode(BaseModel):
+    """One node in a graph traversal result.
+
+    ``label`` is AGE's vertex label (e.g. ``base``) or the LightRAG
+    ``entity_type`` when available; ``properties`` is the verbatim
+    ``properties`` dict the cypher layer surfaces. Both are ``None`` when
+    the underlying agtype payload didn't carry them.
+    """
+
+    id: str
+    label: str | None = None
+    properties: dict | None = None
+
+
+class KGEdge(BaseModel):
+    """One edge in a graph traversal result.
+
+    ``source`` / ``target`` are the LightRAG entity-ID-shaped endpoints
+    when available (``properties.source_id`` / ``properties.target_id``)
+    and fall back to AGE's numeric ``start_id`` / ``end_id`` otherwise.
+    ``type`` mirrors the cypher edge label.
+    """
+
+    source: str | None = None
+    target: str | None = None
+    type: str | None = None
+    properties: dict | None = None
+
+
+class KGSubgraphResponse(BaseModel):
+    """Response body for ``/v1/kg/entities/{id}/neighbors`` and ``/subgraph``.
+
+    Nodes are de-duplicated by id; edges by ``(source, target, type)``.
+    Both lists may be empty when the underlying graph is missing or AGE
+    is not installed — see :func:`rag_service.kg.graph._run_traversal`.
+    """
+
+    nodes: list[KGNode]
+    edges: list[KGEdge]
