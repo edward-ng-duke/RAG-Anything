@@ -71,6 +71,12 @@
 
 ---
 
+## 🔗 Integrations
+
+- **[ONYX](ONYX_INTEGRATION_PLAN.md)** — Service-to-service `/v1/onyx/*` API surface used by the ONYX backend to drive RAG-Anything's KB / documents / query / KG features. Full integration guide for ONYX team is in [ONYX_INTEGRATION_PLAN.md](ONYX_INTEGRATION_PLAN.md); machine-readable spec at [docs/onyx-integration/openapi.yaml](docs/onyx-integration/openapi.yaml).
+
+---
+
 ## 🎉 News
 - [X] [2025.10]🎯📢 🚀 We have released the technical report of [RAG-Anything](http://arxiv.org/abs/2510.12323). Access it now to explore our latest research findings.
 - [X] [2025.08]🎯📢 🔍 RAG-Anything now features **VLM-Enhanced Query** mode! When documents include images, the system seamlessly integrates them into VLM for advanced multimodal analysis, combining visual and textual context for deeper insights.
