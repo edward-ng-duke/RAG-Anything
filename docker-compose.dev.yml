@@ -1,0 +1,88 @@
+services:
+  pg:
+    build:
+      context: apps/server/docker
+      dockerfile: poc-pg.Dockerfile
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+      POSTGRES_DB: rag
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks: [rag-dev-net]
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    networks: [rag-dev-net]
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    command: ["rag-api"]
+    environment: &rag-env
+      DATABASE_URL: postgresql+asyncpg://rag:rag@pg:5432/rag
+      REDIS_URL: redis://redis:6379/0
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN:-dev-secret}
+      LLM_BASE_URL: ${LLM_BASE_URL}
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_MODEL: ${LLM_MODEL}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+      VLM_MODEL: ${VLM_MODEL:-}
+      MINERU_CLOUD_API_KEY: ${MINERU_CLOUD_API_KEY:-}
+      PARSER_MODE: ${PARSER_MODE:-mineru_cloud}
+      DATA_DIR: /data
+      MAX_UPLOAD_MB: 1000
+      LRU_INSTANCE_CAP: 32
+    ports:
+      - "8000:8000"
+    volumes:
+      - rag-data:/data
+    depends_on:
+      pg:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [rag-dev-net]
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    command: ["rag-worker"]
+    environment: *rag-env
+    volumes:
+      - rag-data:/data
+    depends_on:
+      pg:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [rag-dev-net]
+
+volumes:
+  pg-data:
+  redis-data:
+  rag-data:
+
+networks:
+  rag-dev-net:
+    driver: bridge
