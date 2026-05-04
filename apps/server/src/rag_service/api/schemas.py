@@ -165,3 +165,69 @@ class TenantInfoResponse(BaseModel):
     storage_quota_mb: int
     storage_used_mb: float
     document_count: int
+
+
+# ---------------------------------------------------------------------------
+# Auth (Task 2.4) — signup / login / me
+# ---------------------------------------------------------------------------
+
+
+class SignupRequest(BaseModel):
+    """Request body for ``POST /v1/auth/signup``.
+
+    ``display_name`` is optional; when omitted the auto-provisioned tenant
+    falls back to the local-part of the email.
+    """
+
+    email: str
+    password: str
+    display_name: str | None = None
+
+
+class LoginRequest(BaseModel):
+    """Request body for ``POST /v1/auth/login``."""
+
+    email: str
+    password: str
+
+
+class UserInfo(BaseModel):
+    """Public projection of a ``users`` row.
+
+    ``password_hash`` and other internal columns are intentionally omitted.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    user_id: UUID
+    email: str
+    display_name: str | None
+
+
+class TenantBrief(BaseModel):
+    """One tenant the caller is a member of, plus their role on it."""
+
+    tenant_id: str
+    display_name: str
+    role: str
+
+
+class AuthTokens(BaseModel):
+    """Response body for ``POST /v1/auth/signup`` and ``POST /v1/auth/login``.
+
+    The access token is short-lived; the refresh token rotates on use.
+    ``tenants`` is the list of memberships so the client can populate the
+    tenant-switcher without a follow-up ``/v1/auth/me`` round-trip.
+    """
+
+    access_token: str
+    refresh_token: str
+    user: UserInfo
+    tenants: list[TenantBrief]
+
+
+class MeResponse(BaseModel):
+    """Response body for ``GET /v1/auth/me``."""
+
+    user: UserInfo
+    tenants: list[TenantBrief]
