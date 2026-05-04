@@ -2,7 +2,7 @@
 #
 # Base: apache/age PG16 image. Tag preference is PG16_latest; if unavailable
 # at build time, swap to apache/age:release_PG16_1.5.0 (last known-good tag).
-FROM apache/age:PG16_latest
+FROM apache/age:release_PG16_1.5.0
 
 # pgvector install strategy: build from source.
 # Rationale: the apache/age image is Debian-based but its apt repos do not
