@@ -16,9 +16,11 @@ WORKDIR /app
 # raganything is declared as a path-editable source from apps/server/pyproject.toml
 # (path = "../.."), so it must live at /app/raganything when WORKDIR=/app/apps/server.
 COPY pyproject.toml ./
+COPY README.md ./
 COPY raganything ./raganything
 # LightRAG is a regular pip dep (lightrag-hku from PyPI); not a path source, so no copy needed.
 COPY apps/server/pyproject.toml apps/server/pyproject.toml
+COPY apps/server/README.md apps/server/README.md
 
 # uv lockfile, if present (best-effort; the build still works without it via --frozen fallback).
 COPY apps/server/uv.loc[k] apps/server/uv.lock

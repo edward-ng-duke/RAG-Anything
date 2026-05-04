@@ -10,23 +10,26 @@ FROM apache/age:release_PG16_1.5.0
 # default in this image, and adding it just to grab one package is heavier
 # than a quick source build). Source build is small, deterministic, and
 # pinned to a known-good pgvector tag.
-ARG PGVECTOR_REF=v0.7.4
 USER root
+
+# pgvector tarball is pre-downloaded on the host (codeload.github.com) and
+# COPY'd in, because some build networks can't reach github.com:443 directly.
+COPY pgvector.tar.gz /tmp/pgvector.tar.gz
 
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
-        git \
         postgresql-server-dev-16; \
-    git clone --depth 1 --branch "${PGVECTOR_REF}" https://github.com/pgvector/pgvector.git /tmp/pgvector; \
+    mkdir -p /tmp/pgvector; \
+    tar -xzf /tmp/pgvector.tar.gz --strip-components=1 -C /tmp/pgvector; \
     cd /tmp/pgvector; \
     make OPTFLAGS=""; \
     make install; \
     cd /; \
-    rm -rf /tmp/pgvector; \
-    apt-get purge -y --auto-remove build-essential git postgresql-server-dev-16; \
+    rm -rf /tmp/pgvector /tmp/pgvector.tar.gz; \
+    apt-get purge -y --auto-remove build-essential postgresql-server-dev-16; \
     rm -rf /var/lib/apt/lists/*
 
 # Bootstrap extensions + lightrag schema on first PG init.
