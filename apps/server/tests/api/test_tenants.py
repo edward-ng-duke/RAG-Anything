@@ -38,13 +38,21 @@ import pytest  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from rag_service.api.auth import current_tenant, current_user  # noqa: E402
 from rag_service.api.deps import get_db_session  # noqa: E402
 from rag_service.api.routers import tenants as tenants_mod  # noqa: E402
 from rag_service.db.models import Document, Tenant  # noqa: E402
 
 
-_TEST_TOKEN = "test-token"
 _MB = 1024 * 1024
+
+
+class _MockUser:
+    """Minimal stand-in for the ``User`` row that ``current_user`` returns."""
+
+    def __init__(self, user_id: uuid.UUID | None = None) -> None:
+        self.user_id = user_id or uuid.uuid4()
+        self.is_active = True
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +154,13 @@ class _FakeSession:
 # ---------------------------------------------------------------------------
 
 
-def _make_app(fake_session: _FakeSession) -> FastAPI:
-    """Build a FastAPI app with the tenants router and DB fake wired in."""
+def _make_app(fake_session: _FakeSession, *, tenant: str = "tnt-1") -> FastAPI:
+    """Build a FastAPI app with the tenants router and DB fake wired in.
+
+    Auth is overridden directly: ``current_user`` returns a mock user and
+    ``current_tenant`` returns ``tenant``. Cross-tenant tests pass a
+    different ``tenant`` instead of threading a header.
+    """
     app = FastAPI()
     app.include_router(tenants_mod.router)
 
@@ -158,15 +171,16 @@ def _make_app(fake_session: _FakeSession) -> FastAPI:
             await fake_session.rollback()
             raise
 
+    async def _user_override() -> _MockUser:
+        return _MockUser()
+
+    async def _tenant_override() -> str:
+        return tenant
+
     app.dependency_overrides[get_db_session] = _db_override
+    app.dependency_overrides[current_user] = _user_override
+    app.dependency_overrides[current_tenant] = _tenant_override
     return app
-
-
-def _auth_headers(tenant: str = "tnt-1") -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {_TEST_TOKEN}",
-        "X-Tenant-Id": tenant,
-    }
 
 
 def _make_tenant(
@@ -210,34 +224,20 @@ def _make_doc(
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def pinned_token(monkeypatch):
-    """Pin ``settings.internal_token`` so auth is deterministic across the suite."""
-    from rag_service.config import settings
-
-    monkeypatch.setattr(settings, "internal_token", _TEST_TOKEN)
-    return _TEST_TOKEN
-
-
-# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 
-def test_me_returns_tenant_info(pinned_token):
+def test_me_returns_tenant_info():
     """Tenant + two indexed 1 MB / 2 MB docs surfaces correctly aggregated stats."""
     tenant = _make_tenant("tnt-1", display_name="Acme Co.", storage_quota_mb=1024)
     doc_a = _make_doc(tenant_id="tnt-1", file_size=1 * _MB, file_name="a.pdf")
     doc_b = _make_doc(tenant_id="tnt-1", file_size=2 * _MB, file_name="b.pdf")
     session = _FakeSession(tenants=[tenant], docs=[doc_a, doc_b])
-    app = _make_app(session)
+    app = _make_app(session, tenant="tnt-1")
 
     client = TestClient(app)
-    r = client.get("/v1/tenants/me", headers=_auth_headers("tnt-1"))
+    r = client.get("/v1/tenants/me")
 
     assert r.status_code == 200, r.text
     body = r.json()
@@ -248,21 +248,21 @@ def test_me_returns_tenant_info(pinned_token):
     assert body["document_count"] == 2
 
 
-def test_me_404_if_tenant_missing(pinned_token):
+def test_me_404_if_tenant_missing():
     """An auth claim with no matching ``tenants`` row collapses to 404."""
     # Seed only an unrelated tenant so the lookup misses.
     other = _make_tenant("tnt-other")
     session = _FakeSession(tenants=[other], docs=[])
-    app = _make_app(session)
+    app = _make_app(session, tenant="tnt-1")
 
     client = TestClient(app)
-    r = client.get("/v1/tenants/me", headers=_auth_headers("tnt-1"))
+    r = client.get("/v1/tenants/me")
 
     assert r.status_code == 404
     assert r.json() == {"detail": "tenant not found"}
 
 
-def test_me_excludes_deleted_docs(pinned_token):
+def test_me_excludes_deleted_docs():
     """Soft-deleted docs are excluded from both the size sum and the count."""
     tenant = _make_tenant("tnt-1", storage_quota_mb=1024)
     live_a = _make_doc(tenant_id="tnt-1", file_size=1 * _MB, file_name="a.pdf")
@@ -274,10 +274,10 @@ def test_me_excludes_deleted_docs(pinned_token):
         file_name="ghost.pdf",
     )
     session = _FakeSession(tenants=[tenant], docs=[live_a, live_b, deleted])
-    app = _make_app(session)
+    app = _make_app(session, tenant="tnt-1")
 
     client = TestClient(app)
-    r = client.get("/v1/tenants/me", headers=_auth_headers("tnt-1"))
+    r = client.get("/v1/tenants/me")
 
     assert r.status_code == 200, r.text
     body = r.json()

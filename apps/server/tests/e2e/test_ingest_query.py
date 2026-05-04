@@ -192,7 +192,10 @@ async def test_e2e_ingest_query_roundtrip(tmp_path, monkeypatch):
     # ------------------------------------------------------------------
     # 4) Override deps. The DB dep yields from our in-memory engine; the
     #    rag-cache dep returns a fake whose ``aquery`` is a canned answer.
+    #    Auth deps are overridden directly so the test focuses on the
+    #    ingest→query plumbing rather than re-litigating JWT decode.
     # ------------------------------------------------------------------
+    from rag_service.api.auth import current_tenant, current_user
     from rag_service.api.deps import get_db_session, get_rag_cache, get_redis
     from rag_service.api.routers import ingest as ingest_mod
 
@@ -204,6 +207,17 @@ async def test_e2e_ingest_query_roundtrip(tmp_path, monkeypatch):
             except Exception:
                 await s.rollback()
                 raise
+
+    class _MockUser:
+        def __init__(self) -> None:
+            self.user_id = uuid.uuid4()
+            self.is_active = True
+
+    async def _user_override():
+        return _MockUser()
+
+    async def _tenant_override() -> str:
+        return _TEST_TENANT
 
     fake_redis = fakeredis.aioredis.FakeRedis()
 
@@ -240,6 +254,8 @@ async def test_e2e_ingest_query_roundtrip(tmp_path, monkeypatch):
     app.dependency_overrides[get_db_session] = _db_override
     app.dependency_overrides[get_redis] = _redis_override
     app.dependency_overrides[get_rag_cache] = _cache_override
+    app.dependency_overrides[current_user] = _user_override
+    app.dependency_overrides[current_tenant] = _tenant_override
 
     # Stub the arq enqueue so the ingest path doesn't open a real Redis
     # pool — fakeredis can't satisfy arq's ``RedisSettings.from_dsn`` flow.
@@ -250,10 +266,10 @@ async def test_e2e_ingest_query_roundtrip(tmp_path, monkeypatch):
     # 5) Drive the HTTP surface.
     # ------------------------------------------------------------------
     client = TestClient(app)
-    headers = {
-        "Authorization": f"Bearer {_TEST_TOKEN}",
-        "X-Tenant-Id": _TEST_TENANT,
-    }
+    # Auth is overridden via ``app.dependency_overrides`` above, so the
+    # request needs no real bearer header — a placeholder dict keeps the
+    # call sites stable.
+    headers: dict[str, str] = {}
 
     # 5a) Ingest a tiny PDF.
     pdf_bytes = b"%PDF-1.4\n%e2e-roundtrip\n%%EOF\n"

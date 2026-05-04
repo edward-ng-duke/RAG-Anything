@@ -1,11 +1,7 @@
-"""``/v1/auth`` — signup / login / me.
+"""``/v1/auth`` — signup / login / me / refresh / logout / select_tenant.
 
-Three endpoints that bootstrap the user-identity surface for the alpha
-product. They are deliberately self-contained — refresh / logout /
-select-tenant land in Task 2.5 and replacement of the legacy
-``current_tenant`` dep lands in Task 2.6.
-
-Token strategy:
+Endpoints that bootstrap and manage the user-identity surface for the
+alpha product. Token strategy:
 
 * ``POST /v1/auth/signup`` — create a user, auto-provision a personal
   tenant (``u-<userid12>``) with the new user as ``owner``, return both
@@ -14,11 +10,15 @@ Token strategy:
   return tokens scoped to the user's first tenant (if any).
 * ``GET /v1/auth/me`` — JWT-protected; returns the user row plus its
   tenant memberships.
+* ``POST /v1/auth/refresh`` — mint a new access token from a refresh.
+* ``POST /v1/auth/logout`` — best-effort revoke access + refresh.
+* ``POST /v1/auth/select_tenant`` — switch the active tenant, mint a
+  fresh access token bound to it.
 
-Every endpoint that requires authentication uses :func:`_current_user`
-defined inline below; once Task 2.6 lands this will move to a shared dep
-module. The dep validates the bearer token, checks the access blacklist,
-asserts the ``type`` claim, and resolves the user row.
+Every endpoint that needs an authenticated caller depends on the shared
+:func:`rag_service.api.auth.current_user`, which validates the bearer
+token, checks the access blacklist, asserts the ``type=access`` claim,
+and resolves the user row.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from rag_service.api.auth import current_user
 from rag_service.api.deps import get_db_session, get_redis
 from rag_service.api.schemas import (
     AuthTokens,
@@ -48,7 +49,6 @@ from rag_service.auth.jwt import (
     create_access_token,
     create_refresh_token,
     decode_token,
-    is_access_blacklisted,
     is_refresh_revoked,
     revoke_refresh,
 )
@@ -57,43 +57,6 @@ from rag_service.db.models import Membership, Tenant, User
 from rag_service.observability.metrics import rag_auth_login_total
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
-
-
-async def _current_user(
-    authorization: str | None = Header(default=None),
-    db: AsyncSession = Depends(get_db_session),
-    redis=Depends(get_redis),
-) -> User:
-    """Resolve the JWT-authenticated user or raise 401.
-
-    Validates four things in order: bearer-prefixed header, blacklist
-    membership, signature/exp via ``decode_token``, and ``type=access``
-    claim. Finally loads the user row and rejects deactivated accounts.
-    """
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing bearer token")
-    token = authorization[len("Bearer "):]
-    if await is_access_blacklisted(redis, token):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "token revoked")
-    try:
-        claims = decode_token(token)
-    except Exception:  # noqa: BLE001 — pyjwt error tree, treat all as 401
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token")
-    if claims.get("type") != "access":
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "wrong token type")
-    # ``sub`` is always a string in the JWT; the column is a UUID. Convert
-    # explicitly so the dialect-specific bind processor (PG UUID or sqlite
-    # CHAR(36)) sees the right type.
-    try:
-        user_id = uuid.UUID(claims["sub"])
-    except (ValueError, TypeError, KeyError):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token")
-    user = (
-        await db.execute(select(User).where(User.user_id == user_id))
-    ).scalar_one_or_none()
-    if user is None or not user.is_active:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user disabled")
-    return user
 
 
 async def _user_tenants(db: AsyncSession, user_id) -> list[TenantBrief]:
@@ -224,7 +187,7 @@ async def login(
 
 @router.get("/me", response_model=MeResponse)
 async def me(
-    user: User = Depends(_current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> MeResponse:
     """Return the authenticated user's profile + tenant memberships."""
@@ -300,7 +263,7 @@ async def logout(
 @router.post("/select_tenant", response_model=SelectTenantResponse)
 async def select_tenant(
     req: SelectTenantRequest,
-    user: User = Depends(_current_user),
+    user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db_session),
 ) -> SelectTenantResponse:
     """Switch the active tenant on the caller's session.

@@ -37,12 +37,21 @@ import pytest  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from rag_service.api.auth import current_tenant, current_user  # noqa: E402
 from rag_service.api.deps import get_db_session, get_rag_cache  # noqa: E402
 from rag_service.api.routers import query as query_mod  # noqa: E402
 from rag_service.db.models import QueryLog  # noqa: E402
 
 
-_TEST_TOKEN = "test-token"
+import uuid as _uuid  # noqa: E402
+
+
+class _MockUser:
+    """Minimal stand-in for the ``User`` row that ``current_user`` returns."""
+
+    def __init__(self, user_id: _uuid.UUID | None = None) -> None:
+        self.user_id = user_id or _uuid.uuid4()
+        self.is_active = True
 
 
 # ---------------------------------------------------------------------------
@@ -107,8 +116,14 @@ def _make_app(
     *,
     rag: Any,
     session: _FakeSession | None = None,
+    tenant: str = "tnt-1",
 ) -> tuple[FastAPI, _FakeRagCache, _FakeSession]:
-    """Build a FastAPI app with the query router and dependency overrides."""
+    """Build a FastAPI app with the query router and dependency overrides.
+
+    Auth is overridden directly: ``current_user`` returns a mock user and
+    ``current_tenant`` returns ``tenant``. Tests no longer thread bearer
+    headers through the request — they pass ``tenant=`` instead.
+    """
     app = FastAPI()
     app.include_router(query_mod.router)
 
@@ -125,30 +140,17 @@ def _make_app(
     async def _cache_override():
         return cache
 
+    async def _user_override() -> _MockUser:
+        return _MockUser()
+
+    async def _tenant_override() -> str:
+        return tenant
+
     app.dependency_overrides[get_db_session] = _db_override
     app.dependency_overrides[get_rag_cache] = _cache_override
+    app.dependency_overrides[current_user] = _user_override
+    app.dependency_overrides[current_tenant] = _tenant_override
     return app, cache, sess
-
-
-def _auth_headers(tenant: str = "tnt-1") -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {_TEST_TOKEN}",
-        "X-Tenant-Id": tenant,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def pinned_token(monkeypatch):
-    """Pin ``settings.internal_token`` so auth is deterministic across the suite."""
-    from rag_service.config import settings
-
-    monkeypatch.setattr(settings, "internal_token", _TEST_TOKEN)
-    return _TEST_TOKEN
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +158,7 @@ def pinned_token(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_query_basic_hybrid(pinned_token):
+def test_query_basic_hybrid():
     """Bare-string answer wraps as ``sources=[]`` and returns 200."""
     rag = AsyncMock()
     rag.aquery = AsyncMock(return_value="The capital of France is Paris.")
@@ -170,7 +172,6 @@ def test_query_basic_hybrid(pinned_token):
     r = client.post(
         "/v1/query",
         json={"question": "What is the capital of France?"},
-        headers=_auth_headers(),
     )
 
     assert r.status_code == 200, r.text
@@ -186,7 +187,7 @@ def test_query_basic_hybrid(pinned_token):
     )
 
 
-def test_query_with_sources(pinned_token):
+def test_query_with_sources():
     """Dict-shaped RA result is mapped into a list of ``QuerySource``."""
     rag = AsyncMock()
     rag.aquery = AsyncMock(
@@ -218,7 +219,6 @@ def test_query_with_sources(pinned_token):
     r = client.post(
         "/v1/query",
         json={"question": "Where is Paris?", "top_k": 5},
-        headers=_auth_headers(),
     )
 
     assert r.status_code == 200, r.text
@@ -250,7 +250,7 @@ def test_query_with_sources(pinned_token):
     assert log_row.token_out == 30
 
 
-def test_query_vlm_enhanced(pinned_token):
+def test_query_vlm_enhanced():
     """``vlm_enhanced=True`` dispatches to ``aquery_vlm_enhanced``."""
     rag = AsyncMock()
     rag.aquery = AsyncMock(side_effect=AssertionError("must not be called"))
@@ -269,7 +269,6 @@ def test_query_vlm_enhanced(pinned_token):
             "mode": "mix",
             "top_k": 7,
         },
-        headers=_auth_headers(),
     )
 
     assert r.status_code == 200, r.text
@@ -281,7 +280,7 @@ def test_query_vlm_enhanced(pinned_token):
     rag.aquery.assert_not_awaited()
 
 
-def test_query_llm_5xx_returns_502(pinned_token):
+def test_query_llm_5xx_returns_502():
     """``httpx.HTTPStatusError(503)`` from RA surfaces as 502."""
     rag = AsyncMock()
     request = httpx.Request("POST", "http://llm/v1/chat/completions")
@@ -298,14 +297,13 @@ def test_query_llm_5xx_returns_502(pinned_token):
     r = client.post(
         "/v1/query",
         json={"question": "anything"},
-        headers=_auth_headers(),
     )
 
     assert r.status_code == 502, r.text
     assert "503" in r.json()["detail"]
 
 
-def test_query_logs_to_query_log(pinned_token):
+def test_query_logs_to_query_log():
     """A successful query inserts one row into ``query_log`` and commits."""
     rag = AsyncMock()
     rag.aquery = AsyncMock(
@@ -316,13 +314,12 @@ def test_query_logs_to_query_log(pinned_token):
         }
     )
 
-    app, _cache, sess = _make_app(rag=rag)
+    app, _cache, sess = _make_app(rag=rag, tenant="tnt-42")
 
     client = TestClient(app)
     r = client.post(
         "/v1/query",
         json={"question": "ping?", "mode": "local"},
-        headers=_auth_headers("tnt-42"),
     )
 
     assert r.status_code == 200, r.text
@@ -339,7 +336,7 @@ def test_query_logs_to_query_log(pinned_token):
     assert sess.commits == 1
 
 
-def test_query_log_failure_doesnt_fail_request(pinned_token):
+def test_query_log_failure_doesnt_fail_request():
     """A raise from the query_log INSERT path leaves the response 200."""
     rag = AsyncMock()
     rag.aquery = AsyncMock(return_value="hello")
@@ -351,7 +348,6 @@ def test_query_log_failure_doesnt_fail_request(pinned_token):
     r = client.post(
         "/v1/query",
         json={"question": "anything"},
-        headers=_auth_headers(),
     )
 
     assert r.status_code == 200, r.text

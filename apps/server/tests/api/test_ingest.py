@@ -7,8 +7,13 @@ and ``monkeypatch`` so the tests don't need Postgres or Redis. We exercise:
 * size enforcement when ``max_upload_mb`` is monkey-patched very low;
 * dedup behaviour when a row with the same content_hash already exists;
 * MIME rejection for HTML payloads (``<html>...``);
-* missing-Authorization-header → 401;
-* missing-X-Tenant-Id-header → 400.
+* missing-Authorization-header → 401 (no auth override applied);
+* missing-active-tenant → 400 (current_tenant missing the JWT ``tenant`` claim).
+
+The auth deps (``current_user`` / ``current_tenant``) are overridden
+directly with mock-yielding helpers — no JWT decode happens — so the
+tests focus on the router/DB contract rather than re-litigating
+``test_auth_basic.py``.
 """
 
 from __future__ import annotations
@@ -20,10 +25,6 @@ import os
 
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://u:p@h:5432/dbn")
 os.environ.setdefault("REDIS_URL", "redis://x")
-# We deliberately don't set INTERNAL_TOKEN here — sibling test modules
-# (e.g. test_health) construct the settings singleton with their own
-# token, so we monkey-patch ``settings.internal_token`` per-test instead
-# of relying on env vars.
 os.environ.setdefault("INTERNAL_TOKEN", "x")
 os.environ.setdefault("LLM_BASE_URL", "http://llm")
 os.environ.setdefault("LLM_API_KEY", "x")
@@ -42,6 +43,7 @@ import pytest  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from rag_service.api.auth import current_tenant, current_user  # noqa: E402
 from rag_service.api.deps import get_db_session  # noqa: E402
 from rag_service.api.routers import ingest as ingest_mod  # noqa: E402
 
@@ -110,12 +112,29 @@ class _FakeSession:
 # ---------------------------------------------------------------------------
 
 
+class _MockUser:
+    """Minimal stand-in for the ``User`` ORM row that ``current_user`` returns."""
+
+    def __init__(self, user_id: uuid.UUID | None = None) -> None:
+        self.user_id = user_id or uuid.uuid4()
+        self.is_active = True
+
+
 def _make_app(
     fake_session: _FakeSession,
     enqueue_mock: AsyncMock,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    tenant: str | None = "tnt-1",
+    skip_auth_overrides: bool = False,
 ) -> FastAPI:
-    """Build a FastAPI app with the ingest router and fakes wired in."""
+    """Build a FastAPI app with the ingest router and fakes wired in.
+
+    ``tenant=None`` simulates an authenticated user with no active tenant
+    selected — ``current_tenant`` raises 400. ``skip_auth_overrides=True``
+    leaves the real JWT-based deps in place so the missing-auth case is
+    exercised against the production code path.
+    """
     monkeypatch.setattr(ingest_mod, "enqueue_ingest", enqueue_mock)
 
     app = FastAPI()
@@ -131,14 +150,25 @@ def _make_app(
             raise
 
     app.dependency_overrides[get_db_session] = _db_override
+
+    if not skip_auth_overrides:
+        async def _user_override() -> _MockUser:
+            return _MockUser()
+
+        async def _tenant_override() -> str:
+            if tenant is None:
+                from fastapi import HTTPException, status
+
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "no active tenant; call select_tenant",
+                )
+            return tenant
+
+        app.dependency_overrides[current_user] = _user_override
+        app.dependency_overrides[current_tenant] = _tenant_override
+
     return app
-
-
-def _auth_headers(tenant: str = "tnt-1") -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {_TEST_TOKEN}",
-        "X-Tenant-Id": tenant,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -146,22 +176,17 @@ def _auth_headers(tenant: str = "tnt-1") -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-_TEST_TOKEN = "test-token"
-
-
 @pytest.fixture
 def tmp_data_dir(tmp_path, monkeypatch):
-    """Point ``settings.data_dir`` at a tmp path and pin the auth token.
+    """Point ``settings.data_dir`` at a tmp path.
 
-    Pins ``settings.internal_token`` to a known value because the
-    ``settings`` singleton may have been constructed by a sibling test
-    module under a different token — env vars at import time are not
-    enough to keep auth deterministic across the suite.
+    Auth is exercised via dependency overrides on ``current_user`` /
+    ``current_tenant`` rather than a real bearer token, so the legacy
+    ``settings.internal_token`` pin is no longer needed.
     """
     from rag_service.config import settings
 
     monkeypatch.setattr(settings, "data_dir", tmp_path)
-    monkeypatch.setattr(settings, "internal_token", _TEST_TOKEN)
     return tmp_path
 
 
@@ -180,7 +205,6 @@ def test_ingest_valid_pdf(tmp_data_dir, monkeypatch):
     client = TestClient(app)
     r = client.post(
         "/v1/ingest",
-        headers=_auth_headers(),
         files={"file": ("hello.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
     )
 
@@ -214,7 +238,6 @@ def test_ingest_oversized_413(tmp_data_dir, monkeypatch):
     client = TestClient(app)
     r = client.post(
         "/v1/ingest",
-        headers=_auth_headers(),
         files={"file": ("big.pdf", io.BytesIO(big), "application/pdf")},
     )
 
@@ -242,7 +265,6 @@ def test_ingest_dedup_returns_existing(tmp_data_dir, monkeypatch):
     client = TestClient(app)
     r = client.post(
         "/v1/ingest",
-        headers=_auth_headers(),
         files={"file": ("dup.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
     )
 
@@ -270,7 +292,6 @@ def test_ingest_bad_mime_415(tmp_data_dir, monkeypatch):
     client = TestClient(app)
     r = client.post(
         "/v1/ingest",
-        headers=_auth_headers(),
         files={"file": ("evil.html", io.BytesIO(html), "text/html")},
     )
 
@@ -282,15 +303,18 @@ def test_ingest_bad_mime_415(tmp_data_dir, monkeypatch):
 
 
 def test_ingest_missing_auth_401(tmp_data_dir, monkeypatch):
-    """No Authorization header → 401 from ``current_tenant``."""
+    """No Authorization header → 401 from ``current_user``.
+
+    Skips the auth dep overrides so the production JWT-aware ``current_user``
+    runs against the request and rejects it for the missing bearer.
+    """
     session = _FakeSession()
     enqueue = AsyncMock(return_value=None)
-    app = _make_app(session, enqueue, monkeypatch)
+    app = _make_app(session, enqueue, monkeypatch, skip_auth_overrides=True)
 
     client = TestClient(app)
     r = client.post(
         "/v1/ingest",
-        headers={"X-Tenant-Id": "tnt-1"},
         files={"file": ("x.pdf", io.BytesIO(b"%PDF-1.4\n%%EOF\n"), "application/pdf")},
     )
     assert r.status_code == 401
@@ -298,15 +322,14 @@ def test_ingest_missing_auth_401(tmp_data_dir, monkeypatch):
 
 
 def test_ingest_missing_tenant_400(tmp_data_dir, monkeypatch):
-    """Authorization OK but no X-Tenant-Id → 400."""
+    """Authenticated user with no active tenant claim → 400 from ``current_tenant``."""
     session = _FakeSession()
     enqueue = AsyncMock(return_value=None)
-    app = _make_app(session, enqueue, monkeypatch)
+    app = _make_app(session, enqueue, monkeypatch, tenant=None)
 
     client = TestClient(app)
     r = client.post(
         "/v1/ingest",
-        headers={"Authorization": f"Bearer {_TEST_TOKEN}"},
         files={"file": ("x.pdf", io.BytesIO(b"%PDF-1.4\n%%EOF\n"), "application/pdf")},
     )
     assert r.status_code == 400

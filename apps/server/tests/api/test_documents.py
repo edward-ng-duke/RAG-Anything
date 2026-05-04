@@ -41,12 +41,18 @@ import pytest  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from rag_service.api.auth import current_tenant, current_user  # noqa: E402
 from rag_service.api.deps import get_db_session  # noqa: E402
 from rag_service.api.routers import documents as documents_mod  # noqa: E402
 from rag_service.db.models import Document  # noqa: E402
 
 
-_TEST_TOKEN = "test-token"
+class _MockUser:
+    """Minimal stand-in for the ``User`` row that ``current_user`` returns."""
+
+    def __init__(self, user_id: uuid.UUID | None = None) -> None:
+        self.user_id = user_id or uuid.uuid4()
+        self.is_active = True
 
 
 # ---------------------------------------------------------------------------
@@ -233,8 +239,15 @@ def _make_app(
     fake_session: _FakeSession,
     enqueue_mock: AsyncMock | None = None,
     monkeypatch: pytest.MonkeyPatch | None = None,
+    *,
+    tenant: str = "tnt-1",
 ) -> FastAPI:
-    """Build a FastAPI app with the documents router and fakes wired in."""
+    """Build a FastAPI app with the documents router and fakes wired in.
+
+    Auth is overridden to a no-op pair: ``current_user`` returns a fresh
+    in-memory ``User`` and ``current_tenant`` returns ``tenant``. Tests
+    that need cross-tenant behaviour pass a different ``tenant``.
+    """
     if enqueue_mock is not None:
         assert monkeypatch is not None, "monkeypatch required to patch enqueue"
         monkeypatch.setattr(documents_mod, "enqueue_rebuild", enqueue_mock)
@@ -249,15 +262,16 @@ def _make_app(
             await fake_session.rollback()
             raise
 
+    async def _user_override() -> _MockUser:
+        return _MockUser()
+
+    async def _tenant_override() -> str:
+        return tenant
+
     app.dependency_overrides[get_db_session] = _db_override
+    app.dependency_overrides[current_user] = _user_override
+    app.dependency_overrides[current_tenant] = _tenant_override
     return app
-
-
-def _auth_headers(tenant: str = "tnt-1") -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {_TEST_TOKEN}",
-        "X-Tenant-Id": tenant,
-    }
 
 
 def _make_doc(
@@ -296,21 +310,12 @@ def _make_doc(
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def pinned_token(monkeypatch):
-    """Pin ``settings.internal_token`` so auth is deterministic across the suite."""
-    from rag_service.config import settings
-
-    monkeypatch.setattr(settings, "internal_token", _TEST_TOKEN)
-    return _TEST_TOKEN
-
-
 # ---------------------------------------------------------------------------
 # Tests — list
 # ---------------------------------------------------------------------------
 
 
-def test_list_documents_basic(pinned_token):
+def test_list_documents_basic():
     """Three seeded docs round-trip through ``GET /v1/documents``."""
     base = _dt.datetime(2026, 5, 4, 12, 0, 0, tzinfo=_dt.timezone.utc)
     docs = [
@@ -321,7 +326,7 @@ def test_list_documents_basic(pinned_token):
     app = _make_app(session)
 
     client = TestClient(app)
-    r = client.get("/v1/documents", headers=_auth_headers())
+    r = client.get("/v1/documents")
 
     assert r.status_code == 200, r.text
     body = r.json()
@@ -333,7 +338,7 @@ def test_list_documents_basic(pinned_token):
     assert body["next_cursor"] is None
 
 
-def test_list_documents_filter_status(pinned_token):
+def test_list_documents_filter_status():
     """``status=indexed`` filters mixed-status seed down to indexed rows."""
     base = _dt.datetime(2026, 5, 4, 12, 0, 0, tzinfo=_dt.timezone.utc)
     indexed_a = _make_doc(uploaded_at=base, status_="indexed", file_name="a.pdf")
@@ -356,11 +361,7 @@ def test_list_documents_filter_status(pinned_token):
     app = _make_app(session)
 
     client = TestClient(app)
-    r = client.get(
-        "/v1/documents",
-        params={"status": "indexed"},
-        headers=_auth_headers(),
-    )
+    r = client.get("/v1/documents", params={"status": "indexed"})
 
     assert r.status_code == 200, r.text
     body = r.json()
@@ -370,7 +371,7 @@ def test_list_documents_filter_status(pinned_token):
         assert item["status"] == "indexed"
 
 
-def test_list_documents_cursor_paginates(pinned_token):
+def test_list_documents_cursor_paginates():
     """``limit=2`` over 5 docs returns 2 + cursor; cursor returns next 2."""
     base = _dt.datetime(2026, 5, 4, 12, 0, 0, tzinfo=_dt.timezone.utc)
     # Distinct timestamps so the keyset cursor is unambiguous.
@@ -387,11 +388,7 @@ def test_list_documents_cursor_paginates(pinned_token):
     client = TestClient(app)
 
     # First page.
-    r1 = client.get(
-        "/v1/documents",
-        params={"limit": 2},
-        headers=_auth_headers(),
-    )
+    r1 = client.get("/v1/documents", params={"limit": 2})
     assert r1.status_code == 200, r1.text
     page1 = r1.json()
     assert len(page1["items"]) == 2
@@ -405,7 +402,6 @@ def test_list_documents_cursor_paginates(pinned_token):
     r2 = client.get(
         "/v1/documents",
         params={"limit": 2, "cursor": page1["next_cursor"]},
-        headers=_auth_headers(),
     )
     assert r2.status_code == 200, r2.text
     page2 = r2.json()
@@ -422,17 +418,14 @@ def test_list_documents_cursor_paginates(pinned_token):
 # ---------------------------------------------------------------------------
 
 
-def test_get_document_own(pinned_token):
+def test_get_document_own():
     """A document owned by the caller's tenant is returned with full shape."""
     doc = _make_doc(tenant_id="tnt-1", file_name="hello.pdf")
     session = _FakeSession(rows=[doc])
-    app = _make_app(session)
+    app = _make_app(session, tenant="tnt-1")
 
     client = TestClient(app)
-    r = client.get(
-        f"/v1/documents/{doc.document_id}",
-        headers=_auth_headers("tnt-1"),
-    )
+    r = client.get(f"/v1/documents/{doc.document_id}")
 
     assert r.status_code == 200, r.text
     body = r.json()
@@ -444,17 +437,14 @@ def test_get_document_own(pinned_token):
     assert body["uploaded_at"].startswith("2026-05-04")
 
 
-def test_get_document_cross_tenant_404(pinned_token):
+def test_get_document_cross_tenant_404():
     """Document exists for tenant A; tenant B asking for it sees 404."""
     doc = _make_doc(tenant_id="tnt-A")
     session = _FakeSession(rows=[doc])
-    app = _make_app(session)
+    app = _make_app(session, tenant="tnt-B")
 
     client = TestClient(app)
-    r = client.get(
-        f"/v1/documents/{doc.document_id}",
-        headers=_auth_headers("tnt-B"),
-    )
+    r = client.get(f"/v1/documents/{doc.document_id}")
 
     assert r.status_code == 404
     assert r.json() == {"detail": "document not found"}
@@ -465,18 +455,17 @@ def test_get_document_cross_tenant_404(pinned_token):
 # ---------------------------------------------------------------------------
 
 
-def test_delete_document_soft_deletes_and_enqueues(pinned_token, monkeypatch):
+def test_delete_document_soft_deletes_and_enqueues(monkeypatch):
     """DELETE flips status to 'deleted' and calls ``enqueue_rebuild`` once."""
     doc = _make_doc(tenant_id="tnt-1", status_="indexed")
     session = _FakeSession(rows=[doc])
     enqueue = AsyncMock(return_value=None)
-    app = _make_app(session, enqueue_mock=enqueue, monkeypatch=monkeypatch)
+    app = _make_app(
+        session, enqueue_mock=enqueue, monkeypatch=monkeypatch, tenant="tnt-1"
+    )
 
     client = TestClient(app)
-    r = client.delete(
-        f"/v1/documents/{doc.document_id}",
-        headers=_auth_headers("tnt-1"),
-    )
+    r = client.delete(f"/v1/documents/{doc.document_id}")
 
     assert r.status_code == 204, r.text
     assert r.content == b""
@@ -487,17 +476,16 @@ def test_delete_document_soft_deletes_and_enqueues(pinned_token, monkeypatch):
     enqueue.assert_awaited_once_with("tnt-1")
 
 
-def test_delete_missing_404(pinned_token, monkeypatch):
+def test_delete_missing_404(monkeypatch):
     """DELETE on a random uuid yields 404 and does not enqueue rebuild."""
     session = _FakeSession(rows=[])
     enqueue = AsyncMock(return_value=None)
-    app = _make_app(session, enqueue_mock=enqueue, monkeypatch=monkeypatch)
+    app = _make_app(
+        session, enqueue_mock=enqueue, monkeypatch=monkeypatch, tenant="tnt-1"
+    )
 
     client = TestClient(app)
-    r = client.delete(
-        f"/v1/documents/{uuid.uuid4()}",
-        headers=_auth_headers("tnt-1"),
-    )
+    r = client.delete(f"/v1/documents/{uuid.uuid4()}")
 
     assert r.status_code == 404
     assert r.json() == {"detail": "document not found"}

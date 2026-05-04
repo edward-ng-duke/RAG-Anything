@@ -8,7 +8,11 @@ real Postgres. We exercise:
 * tenant isolation: a job that exists for tenant A is invisible to a
   request authenticated as tenant B (404, never 200/403);
 * missing row: a random uuid yields 404;
-* missing auth: no Authorization header → 401 from ``current_tenant``.
+* missing auth: no Authorization header → 401 from ``current_user``.
+
+The auth deps (``current_user`` / ``current_tenant``) are overridden
+directly with mock helpers so each test can express its tenant
+identity without round-tripping a JWT.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ import pytest  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from rag_service.api.auth import current_tenant, current_user  # noqa: E402
 from rag_service.api.deps import get_db_session  # noqa: E402
 from rag_service.api.routers import jobs as jobs_mod  # noqa: E402
 from rag_service.db.models import Job  # noqa: E402
@@ -96,11 +101,25 @@ class _FakeSession:
 # ---------------------------------------------------------------------------
 
 
-_TEST_TOKEN = "test-token"
+class _MockUser:
+    """Minimal stand-in for the ``User`` row that ``current_user`` returns."""
+
+    def __init__(self, user_id: uuid.UUID | None = None) -> None:
+        self.user_id = user_id or uuid.uuid4()
+        self.is_active = True
 
 
-def _make_app(fake_session: _FakeSession) -> FastAPI:
-    """Build a FastAPI app with the jobs router and DB fake wired in."""
+def _make_app(
+    fake_session: _FakeSession,
+    *,
+    tenant: str | None = "tnt-1",
+    skip_auth_overrides: bool = False,
+) -> FastAPI:
+    """Build a FastAPI app with the jobs router and DB fake wired in.
+
+    ``skip_auth_overrides=True`` leaves the production JWT-aware deps in
+    place so the missing-auth case exercises the real 401 path.
+    """
     app = FastAPI()
     app.include_router(jobs_mod.router)
 
@@ -112,14 +131,18 @@ def _make_app(fake_session: _FakeSession) -> FastAPI:
             raise
 
     app.dependency_overrides[get_db_session] = _db_override
+
+    if not skip_auth_overrides:
+        async def _user_override() -> _MockUser:
+            return _MockUser()
+
+        async def _tenant_override() -> str:
+            return tenant or "tnt-1"
+
+        app.dependency_overrides[current_user] = _user_override
+        app.dependency_overrides[current_tenant] = _tenant_override
+
     return app
-
-
-def _auth_headers(tenant: str = "tnt-1") -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {_TEST_TOKEN}",
-        "X-Tenant-Id": tenant,
-    }
 
 
 def _make_job(tenant_id: str = "tnt-1", **overrides: Any) -> Job:
@@ -153,21 +176,12 @@ def _make_job(tenant_id: str = "tnt-1", **overrides: Any) -> Job:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def pinned_token(monkeypatch):
-    """Pin ``settings.internal_token`` so auth is deterministic across the suite."""
-    from rag_service.config import settings
-
-    monkeypatch.setattr(settings, "internal_token", _TEST_TOKEN)
-    return _TEST_TOKEN
-
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 
-def test_get_own_job(pinned_token):
+def test_get_own_job():
     """A job owned by the caller's tenant returns 200 with the JobResponse shape."""
     job = _make_job(
         tenant_id="tnt-1",
@@ -175,10 +189,10 @@ def test_get_own_job(pinned_token):
         progress={"stage": "embedding", "percent": 42},
         retries=1,
     )
-    app = _make_app(_FakeSession(job=job))
+    app = _make_app(_FakeSession(job=job), tenant="tnt-1")
 
     client = TestClient(app)
-    r = client.get(f"/v1/jobs/{job.job_id}", headers=_auth_headers("tnt-1"))
+    r = client.get(f"/v1/jobs/{job.job_id}")
 
     assert r.status_code == 200, r.text
     body = r.json()
@@ -195,36 +209,36 @@ def test_get_own_job(pinned_token):
     assert body["created_at"].startswith("2026-05-04")
 
 
-def test_get_cross_tenant_returns_404(pinned_token):
+def test_get_cross_tenant_returns_404():
     """Job exists for tenant A; tenant B asking for the same id sees 404."""
     job = _make_job(tenant_id="tnt-A")
-    app = _make_app(_FakeSession(job=job))
+    app = _make_app(_FakeSession(job=job), tenant="tnt-B")
 
     client = TestClient(app)
-    r = client.get(f"/v1/jobs/{job.job_id}", headers=_auth_headers("tnt-B"))
+    r = client.get(f"/v1/jobs/{job.job_id}")
 
     assert r.status_code == 404
     assert r.json() == {"detail": "job not found"}
 
 
-def test_get_missing_returns_404(pinned_token):
+def test_get_missing_returns_404():
     """A random UUID with no seeded row yields 404."""
-    app = _make_app(_FakeSession(job=None))
+    app = _make_app(_FakeSession(job=None), tenant="tnt-1")
 
     client = TestClient(app)
-    r = client.get(f"/v1/jobs/{uuid.uuid4()}", headers=_auth_headers("tnt-1"))
+    r = client.get(f"/v1/jobs/{uuid.uuid4()}")
 
     assert r.status_code == 404
     assert r.json() == {"detail": "job not found"}
 
 
-def test_missing_auth_401(pinned_token):
-    """No Authorization header → 401 from ``current_tenant``."""
-    app = _make_app(_FakeSession(job=None))
+def test_missing_auth_401():
+    """No Authorization header → 401 from ``current_user``.
+
+    Skips the auth dep overrides so the production JWT-aware path runs.
+    """
+    app = _make_app(_FakeSession(job=None), skip_auth_overrides=True)
 
     client = TestClient(app)
-    r = client.get(
-        f"/v1/jobs/{uuid.uuid4()}",
-        headers={"X-Tenant-Id": "tnt-1"},
-    )
+    r = client.get(f"/v1/jobs/{uuid.uuid4()}")
     assert r.status_code == 401

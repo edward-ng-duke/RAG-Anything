@@ -40,7 +40,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from rag_service.api.auth import current_tenant
+from rag_service.api.deps import current_tenant
 from rag_service.api.schemas import IngestResponse
 from rag_service.config import settings
 from rag_service.core.paths import document_upload_path, tenant_upload_dir
