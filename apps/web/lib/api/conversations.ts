@@ -1,6 +1,16 @@
 import client from "./client";
 import type { ConversationBrief, ConversationDetailResponse } from "./types";
 
+/**
+ * Path for sending a message to a conversation.
+ *
+ * Note: messages are streamed via Server-Sent Events. There is no `sendMessage`
+ * helper in this module — SSE goes through `lib/api/sse.ts` directly using
+ * `streamSSE(url, init)` so the caller can iterate `delta`/`done`/`error`
+ * events as they arrive. See `app/(app)/chat/[id]/page.tsx` for usage.
+ */
+export const MESSAGES_PATH = (id: string) => `/v1/conversations/${id}/messages`;
+
 export async function listConversations() {
   const r = await client.get<{ items: ConversationBrief[] }>("/v1/conversations");
   return r.data.items;
