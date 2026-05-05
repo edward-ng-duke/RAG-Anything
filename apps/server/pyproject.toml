@@ -25,6 +25,12 @@ dependencies = [
     "bcrypt>=4.0",
     "prometheus-client>=0.17",
     "pyjwt>=2.8",
+    # lightrag's PG storage (PGKVStorage / PGVectorStorage / PGGraphStorage)
+    # imports ``pgvector.asyncpg.register_vector``. Pinning it here means
+    # ``uv sync`` (and the worker/api Dockerfiles that run it) install it
+    # automatically; otherwise every fresh container build needs a manual
+    # ``pip install pgvector`` to avoid a cold-start ModuleNotFoundError.
+    "pgvector>=0.3.6,<1.0",
 ]
 
 [project.scripts]
