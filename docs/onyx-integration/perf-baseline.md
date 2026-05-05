@@ -2,7 +2,7 @@
 
 Run: 2026-05-04T12:33:13.081578+00:00
 
-Stack: local uvicorn (http://127.0.0.1:8801) + dev pg (5432) + dev redis (6379)
+Stack: local uvicorn (http://127.0.0.1:8801) + dev pg (5532) + dev redis (6479)
 
 Calls per endpoint: 5
 

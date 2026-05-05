@@ -18,9 +18,15 @@ Runbook for the alpha-product backend (`apps/server`) + web frontend
 
 ```bash
 docker compose -f docker-compose.dev.yml up --build
-# api  -> http://localhost:8000   (docs at /docs, health at /healthz)
-# web  -> http://localhost:3000
+# api    -> http://localhost:8800   (docs at /docs, health at /healthz)
+# web    -> http://localhost:3300
+# pg     -> localhost:5532          (shifted from 5432 to coexist with onyx)
+# redis  -> localhost:6479          (shifted from 6379 to coexist with onyx)
 ```
+
+A thin top-level `Makefile` wraps the same compose: `make dev`, `make dev-bg`,
+`make dev-down`, `make dev-logs`, `make dev-migrate`, `make dev-rebuild`,
+`make dev-nuke`. Pick whichever style you prefer.
 
 Migrations run automatically when `rag-api` starts. To run them by hand:
 
