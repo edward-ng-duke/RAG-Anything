@@ -147,6 +147,11 @@ def _captured_sql_session(rows: list[Any] | None = None) -> tuple[Any, list[str]
     The execute() coroutine returns a result whose ``.all()`` yields the
     canned ``rows`` (default empty), letting tests assert on both the
     emitted SQL and the post-parse output.
+
+    NOTE: ``_run_traversal`` issues two AGE-bootstrap statements
+    (``LOAD 'age'`` + ``SET search_path = ag_catalog, ...``) before
+    the cypher itself; both are recorded in ``captured`` but tests that
+    only care about the cypher should access ``captured[-1]``.
     """
     captured: list[str] = []
 
@@ -169,8 +174,8 @@ async def test_neighbors_query_builds_correctly() -> None:
     # Hostile entity_id with quotes + a cypher injection attempt.
     out = await graph.neighbors(db, "tenant-a", "a'; DROP", depth=2)
     assert out == {"nodes": [], "edges": []}
-    assert len(captured) == 1
-    sql = captured[0]
+    assert len(captured) == 3  # LOAD age + SET search_path + cypher
+    sql = captured[-1]
     # Graph name mirrors lightrag's _get_workspace_graph_name:
     # ``tenant-a`` -> ``tenant_a_chunk_entity_relation``.
     assert "ag_catalog.cypher('tenant_a_chunk_entity_relation'" in sql
@@ -186,7 +191,7 @@ async def test_neighbors_query_builds_correctly() -> None:
 async def test_neighbors_default_depth_is_one() -> None:
     db, captured = _captured_sql_session()
     await graph.neighbors(db, "tenant-a", "alice")
-    assert "[r*1..1]" in captured[0]
+    assert "[r*1..1]" in captured[-1]
 
 
 async def test_neighbors_resolves_ent_id_to_entity_name(monkeypatch) -> None:
@@ -206,7 +211,7 @@ async def test_neighbors_resolves_ent_id_to_entity_name(monkeypatch) -> None:
     await graph.neighbors(
         db, "tenant-a", "ent-1ec0aec1cdccfcaa6df8e07b40d3e664", depth=1
     )
-    sql = captured[0]
+    sql = captured[-1]
     # The cypher MATCH carries the resolved name, not the surrogate id.
     assert "n.entity_id = 'Dogs'" in sql
     assert "ent-1ec0aec1cdccfcaa6df8e07b40d3e664" not in sql
@@ -227,7 +232,7 @@ async def test_neighbors_passthrough_when_name_already(monkeypatch) -> None:
     monkeypatch.setattr(repository, "get_entity_names_by_ids", _must_not_call)
 
     await graph.neighbors(db, "tenant-a", "Alice")
-    assert "n.entity_id = 'Alice'" in captured[0]
+    assert "n.entity_id = 'Alice'" in captured[-1]
 
 
 async def test_neighbors_falls_back_when_ent_id_unknown(monkeypatch) -> None:
@@ -244,7 +249,7 @@ async def test_neighbors_falls_back_when_ent_id_unknown(monkeypatch) -> None:
     out = await graph.neighbors(db, "tenant-a", "ent-deadbeef")
     assert out == {"nodes": [], "edges": []}
     # Splice keeps the surrogate hyphens (allow-listed in _normalize_node_id).
-    assert "n.entity_id = 'ent-deadbeef'" in captured[0]
+    assert "n.entity_id = 'ent-deadbeef'" in captured[-1]
 
 
 async def test_subgraph_resolves_each_ent_id(monkeypatch) -> None:
@@ -259,7 +264,7 @@ async def test_subgraph_resolves_each_ent_id(monkeypatch) -> None:
     monkeypatch.setattr(repository, "get_entity_names_by_ids", _stub)
 
     await graph.subgraph(db, "tenant-a", ["ent-aaa", "Bob"], depth=1)
-    sql = captured[0]
+    sql = captured[-1]
     assert "'Alice'" in sql
     assert "'Bob'" in sql
     assert "ent-aaa" not in sql
@@ -268,7 +273,7 @@ async def test_subgraph_resolves_each_ent_id(monkeypatch) -> None:
 async def test_subgraph_query_builds_in_clause() -> None:
     db, captured = _captured_sql_session()
     await graph.subgraph(db, "tenant-a", ["alice", "bob"], depth=3)
-    sql = captured[0]
+    sql = captured[-1]
     assert "[r*0..3]" in sql
     assert "n.entity_id IN ['alice','bob']" in sql
 
@@ -276,7 +281,7 @@ async def test_subgraph_query_builds_in_clause() -> None:
 async def test_subgraph_sanitizes_each_id() -> None:
     db, captured = _captured_sql_session()
     await graph.subgraph(db, "tenant-a", ["good", "bad'; --"], depth=1)
-    sql = captured[0]
+    sql = captured[-1]
     # Each id is quoted independently; bad chars in the second id are
     # collapsed so the IN list cannot be broken out of. (Hyphens are in
     # the allowlist, so the trailing ``--`` survives sanitization but

@@ -206,11 +206,22 @@ async def _resolve_to_entity_name(
 async def _run_traversal(db: AsyncSession, sql: str) -> dict:
     """Execute a cypher traversal and assemble the node/edge dict.
 
-    Any DB-side error (graph missing, AGE not installed, malformed result)
-    degrades to an empty result rather than 500ing — KG endpoints are
-    advisory and the caller cannot fix a missing graph by retrying.
+    Apache AGE requires every Postgres session that touches the
+    ``cypher()`` function to first ``LOAD 'age'`` (so the ``agtype`` type
+    is registered) and put ``ag_catalog`` on ``search_path``. SQLAlchemy
+    pools sessions across requests, so we issue both before the cypher
+    on every call — they're no-ops on a session that already has them.
+
+    Any DB-side error (graph missing, AGE not installed, malformed
+    result) degrades to an empty result rather than 500ing — KG
+    endpoints are advisory and the caller cannot fix a missing graph by
+    retrying.
     """
     try:
+        await db.execute(text("LOAD 'age'"))
+        await db.execute(
+            text("SET search_path = ag_catalog, \"$user\", public")
+        )
         rows = (await db.execute(text(sql))).all()
     except Exception:  # noqa: BLE001 — see docstring
         return {"nodes": [], "edges": []}
