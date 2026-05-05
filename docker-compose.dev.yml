@@ -15,7 +15,9 @@ services:
     volumes:
       - pg-data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      # Host port shifted to 5532 so this stack can run alongside onyx's dev
+      # postgres (which publishes 5432). Container-internal port stays 5432.
+      - "5532:5432"
     networks: [rag-dev-net]
 
   redis:
@@ -28,7 +30,9 @@ services:
     volumes:
       - redis-data:/data
     ports:
-      - "6379:6379"
+      # Host port shifted to 6479 so this stack can run alongside onyx's dev
+      # redis (which publishes 6379). Container-internal port stays 6379.
+      - "6479:6379"
     networks: [rag-dev-net]
 
   api:
@@ -50,8 +54,13 @@ services:
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1536}
       VLM_MODEL: ${VLM_MODEL:-}
       MINERU_CLOUD_API_KEY: ${MINERU_CLOUD_API_KEY:-}
+      # Reference script + many .env files use MINERU_CLOUD_TOKEN; settings
+      # accept either via AliasChoices, so forward both into the container.
+      MINERU_CLOUD_TOKEN: ${MINERU_CLOUD_TOKEN:-}
+      MINERU_CLOUD_BASE_URL: ${MINERU_CLOUD_BASE_URL:-}
       PARSER_MODE: ${PARSER_MODE:-mineru_cloud}
       DATA_DIR: /data
       MAX_UPLOAD_MB: 1000

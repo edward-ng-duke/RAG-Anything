@@ -20,6 +20,7 @@ import base64
 from typing import Any, Awaitable, Callable
 
 import httpx
+import numpy as np
 from lightrag.utils import EmbeddingFunc
 
 LLMFunc = Callable[..., Awaitable[str]]
@@ -91,7 +92,7 @@ def make_embedding_func(
     """Build an OpenAI-compatible embeddings wrapper as ``EmbeddingFunc``."""
     base = base_url.rstrip("/")
 
-    async def _embed(texts: list[str]) -> list[list[float]]:
+    async def _embed(texts: list[str]) -> np.ndarray:
         async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.post(
                 f"{base}/embeddings",
@@ -104,8 +105,11 @@ def make_embedding_func(
             r.raise_for_status()
             data = r.json()
             # OpenAI returns {"data": [{"embedding": [...]}, ...]} preserving
-            # input order; we trust that contract.
-            return [item["embedding"] for item in data["data"]]
+            # input order; we trust that contract. LightRAG's adapter expects
+            # a numpy array (it calls ``.size`` on the result), so coerce.
+            return np.asarray(
+                [item["embedding"] for item in data["data"]], dtype=np.float32
+            )
 
     return EmbeddingFunc(
         embedding_dim=embedding_dim,

@@ -65,10 +65,13 @@ async def list_entities(
     db: AsyncSession = Depends(get_db_session),
 ) -> KGEntityListResponse:
     """List entities owned by ``ctx.kb_id`` (alias of α ``list_entities``)."""
+    # ``type`` is accepted for API-shape compatibility but the underlying
+    # ``lightrag_vdb_entity`` table has no ``entity_type`` column, so the
+    # repository does not consume it. Drop it before the call.
+    _ = type
     result = await repository.list_entities(
         db,
         ctx.kb_id,
-        type=type,
         search=search,
         cursor=cursor,
         limit=limit,
@@ -108,12 +111,14 @@ async def list_relations(
     db: AsyncSession = Depends(get_db_session),
 ) -> KGRelationListResponse:
     """List relations owned by ``ctx.kb_id`` (alias of α ``list_relations``)."""
+    # ``type`` accepted for API-shape compatibility; not stored on
+    # ``lightrag_vdb_relation`` so the repository ignores it.
+    _ = type
     result = await repository.list_relations(
         db,
         ctx.kb_id,
         source=source,
         target=target,
-        type=type,
         cursor=cursor,
         limit=limit,
     )

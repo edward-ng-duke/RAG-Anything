@@ -19,14 +19,15 @@ The returned ``content_list`` matches MinerU's standard schema (the same
 shape :class:`raganything.parser.MineruParser` returns), so downstream
 RAGAnything ingestion code can consume it without modification.
 
-Why replicate (not import) the script
--------------------------------------
-The script is sync (``requests``) and returns ``(content_list, image_dir)``
-as a tuple. The :class:`raganything.parser.Parser` contract is async and
-returns just ``content_list``. We also want :class:`httpx.MockTransport`
-hooks so tests don't touch the network. So the cleanest path is to keep
-the script as the readable reference for humans and replicate its endpoint
-shapes / payloads / state machine here, on top of ``httpx.AsyncClient``.
+Interface compatibility
+-----------------------
+RAGAnything's upstream :class:`raganything.parser.Parser` is **sync**
+(``parse_document`` returns a list, ``check_installation`` returns a
+bool). Subclassing it lets ``RAGAnything.doc_parser = MineruCloudParser(...)``
+be a drop-in replacement for the local ``MineruParser``. The async
+implementation lives in :meth:`_parse_document_async`; the public sync
+:meth:`parse_document` runs it in a dedicated thread so we never collide
+with an outer running event loop.
 """
 
 from __future__ import annotations
@@ -35,12 +36,14 @@ import asyncio
 import io
 import json
 import os
+import threading
 import time
 import zipfile
 from pathlib import Path
 from typing import Any
 
 import httpx
+from raganything.parser import Parser
 
 DEFAULT_BASE_URL = "https://mineru.net/api/v4"
 
@@ -64,8 +67,14 @@ class MineruCloudParseFailed(MineruCloudError):
     """Raised when the cloud reports ``state == "failed"`` for our file."""
 
 
-class MineruCloudParser:
-    """Async parser that delegates document parsing to mineru.net.
+class MineruCloudParser(Parser):
+    """Cloud parser that delegates document parsing to mineru.net.
+
+    Subclasses :class:`raganything.parser.Parser` so it can be assigned to
+    :attr:`raganything.RAGAnything.doc_parser` directly. The upstream
+    interface is sync (``parse_document`` returns a list, no ``await``);
+    we wrap the async implementation in a worker thread to avoid colliding
+    with any outer running event loop (e.g. arq).
 
     Parameters
     ----------
@@ -120,10 +129,99 @@ class MineruCloudParser:
         self.enable_table = enable_table
 
     # ------------------------------------------------------------------
-    # Public API
+    # Parser interface (sync — required by raganything.parser.Parser)
     # ------------------------------------------------------------------
 
-    async def parse_document(
+    def check_installation(self) -> bool:
+        """Always available — the cloud API is the only "install" needed,
+        and the constructor already rejected an empty token."""
+        return True
+
+    # The upstream RAGAnything processor dispatches PDFs to ``parse_pdf``
+    # and images to ``parse_image`` directly (not via ``parse_document``),
+    # so we surface both as thin wrappers over the cloud entrypoint.
+
+    def parse_pdf(
+        self,
+        pdf_path: str | Path,
+        output_dir: str | None = None,
+        method: str = "auto",
+        lang: str | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        return self.parse_document(
+            pdf_path,
+            method=method,
+            output_dir=output_dir,
+            lang=lang,
+            **kwargs,
+        )
+
+    def parse_image(
+        self,
+        image_path: str | Path,
+        output_dir: str | None = None,
+        lang: str | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        return self.parse_document(
+            image_path, output_dir=output_dir, lang=lang, **kwargs
+        )
+
+    def parse_office_doc(
+        self,
+        doc_path: str | Path,
+        output_dir: str | None = None,
+        lang: str | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        return self.parse_document(
+            doc_path, output_dir=output_dir, lang=lang, **kwargs
+        )
+
+    def parse_document(
+        self,
+        file_path: str | Path,
+        method: str = "auto",
+        output_dir: str | None = None,
+        lang: str | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        """Sync entrypoint expected by upstream RAGAnything ingestion.
+
+        Runs :meth:`_parse_document_async` in a dedicated worker thread so
+        we never call ``asyncio.run`` from inside an already-running loop
+        (which arq workers always have).
+        """
+        result: dict[str, Any] = {}
+
+        def _worker() -> None:
+            try:
+                result["value"] = asyncio.run(
+                    self._parse_document_async(
+                        file_path,
+                        output_dir or "./output",
+                        lang=lang,
+                        **kwargs,
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001
+                result["error"] = exc
+
+        t = threading.Thread(
+            target=_worker, name="mineru-cloud-parse", daemon=True
+        )
+        t.start()
+        t.join()
+        if "error" in result:
+            raise result["error"]
+        return result["value"]  # type: ignore[no-any-return]
+
+    # ------------------------------------------------------------------
+    # Async implementation
+    # ------------------------------------------------------------------
+
+    async def _parse_document_async(
         self,
         file_path: str | Path,
         output_dir: str | Path,

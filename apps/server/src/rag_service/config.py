@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Annotated, Any
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Whitelist of allowed keys for ``onyx_ratelimit_overrides``. Any key outside
@@ -35,11 +35,21 @@ class Settings(BaseSettings):
     embedding_base_url: str = Field(..., alias="EMBEDDING_BASE_URL")
     embedding_api_key: str = Field(..., alias="EMBEDDING_API_KEY")
     embedding_model: str = Field(..., alias="EMBEDDING_MODEL")
+    # Output dimensionality of the embedding model. Must match what the
+    # provider returns (1536 for OpenAI text-embedding-3-small / ada-002,
+    # 1024 for Qwen3-Embedding-0.6B, 768 for many small open models).
+    embedding_dim: int = Field(default=1536, alias="EMBEDDING_DIM")
     jwt_secret_key: str = Field(..., alias="JWT_SECRET_KEY")
 
     # ---- Optional ----
     vlm_model: str | None = Field(default=None, alias="VLM_MODEL")
-    mineru_cloud_api_key: str | None = Field(default=None, alias="MINERU_CLOUD_API_KEY")
+    # Accept both names: ``MINERU_CLOUD_API_KEY`` (task-spec preferred) and
+    # ``MINERU_CLOUD_TOKEN`` (the name used by the reference parsing script
+    # and many existing ``.env`` files).
+    mineru_cloud_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("MINERU_CLOUD_API_KEY", "MINERU_CLOUD_TOKEN"),
+    )
     parser_mode: str = Field(default="mineru_cloud", alias="PARSER_MODE")
     data_dir: Path = Field(default=Path("./data"), alias="DATA_DIR")
     max_upload_mb: int = Field(default=1000, alias="MAX_UPLOAD_MB")

@@ -247,20 +247,22 @@ class RAGAnythingCache:
             settings.embedding_base_url,
             settings.embedding_api_key,
             settings.embedding_model,
+            embedding_dim=settings.embedding_dim,
         )
         vlm_func = make_vlm_func(
             settings.llm_base_url, settings.llm_api_key, settings.vlm_model
         )
 
-        # Parser selection: use mineru.net cloud parser when configured,
-        # otherwise fall through to RAGAnything's default (local mineru).
+        # Parser selection: when ``parser_mode == "mineru_cloud"`` and a
+        # cloud token is configured, swap RAGAnything's default
+        # ``doc_parser`` (set by ``__post_init__``) with our
+        # :class:`MineruCloudParser`. The cloud parser subclasses the
+        # upstream ``Parser`` so the swap is interface-compatible.
         parser = None
         if (
             settings.parser_mode == "mineru_cloud"
             and settings.mineru_cloud_api_key
         ):
-            # Lazy import: keeps the rag_factory module importable in tests
-            # that don't exercise the cloud parser path.
             from rag_service.parsers.mineru_cloud import get_default_parser
 
             parser = get_default_parser()
@@ -277,14 +279,19 @@ class RAGAnythingCache:
         }
         if vlm_func is not None:
             kwargs["vision_model_func"] = vlm_func
-        if parser is not None:
-            kwargs["parser"] = parser
 
         instance = RAGAnything(**kwargs)
-        # If the RAGAnything implementation exposes an explicit async
-        # initialise hook we honour it; the upstream class instead lazy-
-        # initialises on first use, so we tolerate either shape.
-        init = getattr(instance, "initialize", None)
+        if parser is not None:
+            instance.doc_parser = parser
+        # Eagerly initialise the underlying LightRAG instance so query
+        # endpoints don't fail with "No LightRAG instance available" before
+        # any documents have been ingested in this process. Upstream uses
+        # the private ``_ensure_lightrag_initialized`` hook (no public
+        # ``initialize``); fall back to the public name if a future version
+        # surfaces one.
+        init = getattr(instance, "initialize", None) or getattr(
+            instance, "_ensure_lightrag_initialized", None
+        )
         if init is not None and asyncio.iscoroutinefunction(init):
             await init()
         return instance
