@@ -75,6 +75,39 @@ def test_normalize_node_id_reduces_to_empty_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _graph_name — must mirror lightrag's _get_workspace_graph_name byte-for-byte
+# ---------------------------------------------------------------------------
+
+
+def test_graph_name_substitutes_non_identifier_chars() -> None:
+    """Hyphens and other non-[a-zA-Z0-9_] chars become underscores.
+
+    Regression test for the Wave H smoke bug: prior to the fix this
+    returned the tenant_id verbatim and queries against the AGE graph
+    silently returned empty rows.
+    """
+    assert (
+        graph._graph_name("onyx-abc-123")
+        == "onyx_abc_123_chunk_entity_relation"
+    )
+
+
+def test_graph_name_no_substitutions_needed() -> None:
+    """Already-safe identifiers pass through (modulo namespace suffix)."""
+    assert (
+        graph._graph_name("tenant_a") == "tenant_a_chunk_entity_relation"
+    )
+
+
+def test_graph_name_uuid_style_tenant_id() -> None:
+    """The onyx-{uuid} format from production gets the same treatment as
+    every other tenant_id."""
+    assert graph._graph_name("onyx-6a32cb98-d940-4ca5-a2d7-c5e9bc39e8db") == (
+        "onyx_6a32cb98_d940_4ca5_a2d7_c5e9bc39e8db_chunk_entity_relation"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Depth / input validation
 # ---------------------------------------------------------------------------
 
@@ -138,8 +171,9 @@ async def test_neighbors_query_builds_correctly() -> None:
     assert out == {"nodes": [], "edges": []}
     assert len(captured) == 1
     sql = captured[0]
-    # Graph name is the tenant_id under the default template.
-    assert "ag_catalog.cypher('tenant-a'" in sql
+    # Graph name mirrors lightrag's _get_workspace_graph_name:
+    # ``tenant-a`` -> ``tenant_a_chunk_entity_relation``.
+    assert "ag_catalog.cypher('tenant_a_chunk_entity_relation'" in sql
     # Variable-length pattern with the requested depth.
     assert "[r*1..2]" in sql
     # Sanitized id is what we splice — quote, semicolon, and space are

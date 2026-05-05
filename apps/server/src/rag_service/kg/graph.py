@@ -38,8 +38,13 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# Used by tests / future repos to override.
-GRAPH_NAMESPACE_TEMPLATE = "{workspace}"  # LightRAG default; can be patched if needed
+# LightRAG names every workspace's AGE graph as
+# ``re.sub(r"[^a-zA-Z0-9_]", "_", workspace) + "_" + namespace``
+# (see ``lightrag.kg.postgres_impl._get_workspace_graph_name``). The
+# ``chunk_entity_relation`` namespace is the one used for the KG that
+# upserts entities/relations from document chunks — i.e. exactly the
+# graph our /kg/* routes traverse.
+_GRAPH_NAMESPACE = "chunk_entity_relation"
 
 
 # Allowed characters in a sanitized cypher-embedded entity_id. Keep this
@@ -68,14 +73,24 @@ def _normalize_node_id(entity_id: str) -> str:
 def _graph_name(tenant_id: str) -> str:
     """Map a tenant_id to its AGE graph name.
 
+    Mirrors ``lightrag.kg.postgres_impl.PostgreSQLDB._get_workspace_graph_name``
+    bytewise: PG identifier-safe substitution
+    (``[^a-zA-Z0-9_] -> _``) followed by ``_<namespace>``. Without this the
+    cypher queries target a graph that doesn't exist (e.g.
+    ``onyx-abc-123`` instead of ``onyx_abc_123_chunk_entity_relation``)
+    and AGE returns an empty result set silently.
+
     Reuses ``paths.validate_tenant_id`` so the graph name shares the same
     charset rules as on-disk tenant directories. The lazy import avoids
     a circular dependency at module load.
     """
+    import re as _re
     from rag_service.core.paths import validate_tenant_id
 
     validate_tenant_id(tenant_id)
-    return GRAPH_NAMESPACE_TEMPLATE.format(workspace=tenant_id)
+    safe_workspace = _re.sub(r"[^a-zA-Z0-9_]", "_", tenant_id.strip())
+    safe_namespace = _re.sub(r"[^a-zA-Z0-9_]", "_", _GRAPH_NAMESPACE)
+    return f"{safe_workspace}_{safe_namespace}"
 
 
 # ---------------------------------------------------------------------------
