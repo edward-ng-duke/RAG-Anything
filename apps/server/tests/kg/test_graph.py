@@ -189,6 +189,82 @@ async def test_neighbors_default_depth_is_one() -> None:
     assert "[r*1..1]" in captured[0]
 
 
+async def test_neighbors_resolves_ent_id_to_entity_name(monkeypatch) -> None:
+    """``ent-<hash>`` inputs are translated to entity_name before cypher.
+
+    Regression: lightrag indexes AGE vertices by ``entity_id =
+    entity_name``, so passing the surrogate id verbatim returns 0 rows.
+    """
+    db, captured = _captured_sql_session()
+
+    async def _stub(_db, _tid, eids):
+        return {"ent-1ec0aec1cdccfcaa6df8e07b40d3e664": "Dogs"}
+
+    from rag_service.kg import repository
+    monkeypatch.setattr(repository, "get_entity_names_by_ids", _stub)
+
+    await graph.neighbors(
+        db, "tenant-a", "ent-1ec0aec1cdccfcaa6df8e07b40d3e664", depth=1
+    )
+    sql = captured[0]
+    # The cypher MATCH carries the resolved name, not the surrogate id.
+    assert "n.entity_id = 'Dogs'" in sql
+    assert "ent-1ec0aec1cdccfcaa6df8e07b40d3e664" not in sql
+
+
+async def test_neighbors_passthrough_when_name_already(monkeypatch) -> None:
+    """Inputs that don't match the ``ent-`` prefix are spliced as-is.
+
+    Internal callers that already use names (and tests that pass simple
+    strings) must keep working without round-tripping through the DB.
+    """
+    db, captured = _captured_sql_session()
+
+    async def _must_not_call(*_a, **_k):
+        raise AssertionError("repository should not be consulted for plain names")
+
+    from rag_service.kg import repository
+    monkeypatch.setattr(repository, "get_entity_names_by_ids", _must_not_call)
+
+    await graph.neighbors(db, "tenant-a", "Alice")
+    assert "n.entity_id = 'Alice'" in captured[0]
+
+
+async def test_neighbors_falls_back_when_ent_id_unknown(monkeypatch) -> None:
+    """If the ent-id isn't found, splice it verbatim — better an empty
+    result than a 500 from a missing translation."""
+    db, captured = _captured_sql_session()
+
+    async def _empty(_db, _tid, _eids):
+        return {}
+
+    from rag_service.kg import repository
+    monkeypatch.setattr(repository, "get_entity_names_by_ids", _empty)
+
+    out = await graph.neighbors(db, "tenant-a", "ent-deadbeef")
+    assert out == {"nodes": [], "edges": []}
+    # Splice keeps the surrogate hyphens (allow-listed in _normalize_node_id).
+    assert "n.entity_id = 'ent-deadbeef'" in captured[0]
+
+
+async def test_subgraph_resolves_each_ent_id(monkeypatch) -> None:
+    """Multi-source subgraph translates every ent-id input independently."""
+    db, captured = _captured_sql_session()
+
+    async def _stub(_db, _tid, eids):
+        # Translate one of two; leaves the other to the verbatim fallback.
+        return {"ent-aaa": "Alice"}
+
+    from rag_service.kg import repository
+    monkeypatch.setattr(repository, "get_entity_names_by_ids", _stub)
+
+    await graph.subgraph(db, "tenant-a", ["ent-aaa", "Bob"], depth=1)
+    sql = captured[0]
+    assert "'Alice'" in sql
+    assert "'Bob'" in sql
+    assert "ent-aaa" not in sql
+
+
 async def test_subgraph_query_builds_in_clause() -> None:
     db, captured = _captured_sql_session()
     await graph.subgraph(db, "tenant-a", ["alice", "bob"], depth=3)

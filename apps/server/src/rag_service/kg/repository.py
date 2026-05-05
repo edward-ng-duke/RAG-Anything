@@ -161,6 +161,40 @@ async def get_entity(
     return dict(row) if row else None
 
 
+async def get_entity_names_by_ids(
+    db: AsyncSession,
+    tenant_id: str,
+    entity_ids: list[str],
+) -> dict[str, str]:
+    """Map ``ent-…`` surrogate ids to lightrag's ``entity_name`` strings.
+
+    The KG VDB table (``lightrag_vdb_entity``) stores entities under
+    sha-derived ``ent-<hash>`` surrogate ids in ``id`` and the
+    human-readable name in ``entity_name``. The AGE graph, however,
+    keys vertices on the *entity_name* in the ``entity_id`` property.
+    Callers (graph traversal) need the name; clients carry surrogate
+    ids. This helper does the small lookup.
+
+    Missing ids are silently dropped from the result — the caller
+    decides whether to 404 or fall back. Empty input short-circuits.
+    """
+    if not entity_ids:
+        return {}
+    sql = (
+        "SELECT id, entity_name "
+        f"FROM {_t('lightrag_vdb_entity')} "
+        "WHERE workspace = :ws AND id = ANY(:ids)"
+    )
+    result = await db.execute(
+        text(sql), {"ws": tenant_id, "ids": list(entity_ids)}
+    )
+    return {
+        r["id"]: r["entity_name"]
+        for r in result.mappings().all()
+        if r["entity_name"]
+    }
+
+
 # ---------------------------------------------------------------------------
 # Relations
 # ---------------------------------------------------------------------------

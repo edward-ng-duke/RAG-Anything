@@ -110,11 +110,18 @@ async def neighbors(
     ``depth`` is constrained to ``{1, 2, 3}`` — wider traversals on a
     real-world KG explode quadratically and we'd rather force callers to
     paginate via repeated 1-hop calls than ship a footgun.
+
+    Accepts either a surrogate ``ent-<hash>`` id (as returned by
+    :mod:`rag_service.kg.repository.list_entities` / ``get_entity``) or
+    an entity_name. The vdb-side surrogate ids are resolved to the
+    entity_name string before splicing because lightrag indexes graph
+    nodes by ``entity_id = entity_name``, not by the surrogate hash.
     """
     if depth not in (1, 2, 3):
         raise ValueError("depth must be 1, 2, or 3")
 
-    safe_eid = _normalize_node_id(entity_id)
+    cypher_id = await _resolve_to_entity_name(db, tenant_id, entity_id)
+    safe_eid = _normalize_node_id(cypher_id)
     g = _graph_name(tenant_id)
 
     cypher_q = (
@@ -139,14 +146,19 @@ async def subgraph(
     """Multi-source subgraph rooted at the given ``entity_ids``.
 
     Empty input short-circuits to ``{nodes: [], edges: []}`` rather than
-    issuing a degenerate ``IN []`` query.
+    issuing a degenerate ``IN []`` query. Each ``entity_id`` is resolved
+    to its lightrag ``entity_name`` before splicing — see
+    :func:`neighbors` for the rationale.
     """
     if depth not in (1, 2, 3):
         raise ValueError("depth must be 1, 2, or 3")
     if not entity_ids:
         return {"nodes": [], "edges": []}
 
-    safe_ids = [_normalize_node_id(e) for e in entity_ids]
+    cypher_ids = [
+        await _resolve_to_entity_name(db, tenant_id, eid) for eid in entity_ids
+    ]
+    safe_ids = [_normalize_node_id(e) for e in cypher_ids]
     g = _graph_name(tenant_id)
     id_list = ",".join(f"'{s}'" for s in safe_ids)
 
@@ -167,6 +179,28 @@ async def subgraph(
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+async def _resolve_to_entity_name(
+    db: AsyncSession, tenant_id: str, entity_id_or_name: str,
+) -> str:
+    """Translate a surrogate ``ent-<hash>`` id to its lightrag entity_name.
+
+    ``lightrag_vdb_entity.id`` holds the surrogate; the AGE graph keys on
+    the entity_name string. Callers may pass either form — when no row
+    matches we hand back the input unchanged so existing internal callers
+    that already use names keep working.
+    """
+    if not entity_id_or_name.startswith("ent-"):
+        return entity_id_or_name
+    # Lazy import: kg.graph is imported by routes during module load,
+    # before kg.repository's settings dependency tree is fully wired.
+    from rag_service.kg import repository
+
+    name_map = await repository.get_entity_names_by_ids(
+        db, tenant_id, [entity_id_or_name]
+    )
+    return name_map.get(entity_id_or_name, entity_id_or_name)
 
 
 async def _run_traversal(db: AsyncSession, sql: str) -> dict:
