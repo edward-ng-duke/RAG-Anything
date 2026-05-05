@@ -241,10 +241,11 @@ async def test_list_entities_passes_kb_id_to_repo(session_maker, monkeypatch):
     assert r.status_code == 200, r.text
     repo_mock.assert_awaited_once()
     args, kwargs = repo_mock.call_args
-    # signature: list_entities(db, tenant_id, *, type, search, cursor, limit)
+    # signature: list_entities(db, tenant_id, *, search, cursor, limit) — the
+    # router takes ``type`` from clients for forward-compat but the
+    # repository ignores it (no entity_type column).
     assert args[1] == kb_id
     assert kwargs == {
-        "type": "Location",
         "search": "par",
         "cursor": None,
         "limit": 25,
@@ -347,10 +348,11 @@ async def test_list_relations_returns_items(session_maker, monkeypatch):
 
     args, kwargs = repo_mock.call_args
     assert args[1] == kb_id
+    # ``type`` accepted by the router for API stability but not forwarded
+    # to repository.list_relations (no edge_type column).
     assert kwargs == {
         "source": "Paris",
         "target": "France",
-        "type": None,
         "cursor": None,
         "limit": 10,
     }

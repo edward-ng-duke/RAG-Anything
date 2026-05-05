@@ -217,11 +217,15 @@ async def test_embedding_func_returns_vectors(monkeypatch: pytest.MonkeyPatch) -
     assert ef.max_token_size == 4096
 
     vectors = await ef.func(["a", "b", "c"])
-    assert vectors == [
-        [0.1, 0.2, 0.3],
-        [0.4, 0.5, 0.6],
-        [0.7, 0.8, 0.9],
-    ]
+    # Returned as np.ndarray so lightrag's adapter can call ``.size`` /
+    # ``.shape`` without a list->ndarray round-trip.
+    import numpy as np
+    expected = np.asarray(
+        [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]],
+        dtype=np.float32,
+    )
+    np.testing.assert_array_equal(vectors, expected)
+    assert vectors.dtype == np.float32
     assert captured["url"] == "http://test/v1/embeddings"
     body = json.loads(captured["body"])
     assert body == {"model": "embed-test", "input": ["a", "b", "c"]}

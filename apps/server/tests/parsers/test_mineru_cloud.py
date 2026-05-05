@@ -228,7 +228,11 @@ async def test_parse_happy_path(
         poll_interval=0.0,
         poll_timeout=10.0,
     )
-    result = await parser.parse_document(pdf, out)
+    # Test the async impl directly: the public ``parse_document`` is a
+    # sync wrapper that runs this in a worker thread (so RAGAnything's
+    # sync Parser interface is honoured). The wire/parser logic lives
+    # entirely in ``_parse_document_async``.
+    result = await parser._parse_document_async(pdf, out)
 
     # Returned shape — same length, ordering preserved
     assert isinstance(result, list)
@@ -292,7 +296,11 @@ async def test_parse_returns_correct_shape(
     parser = MineruCloudParser(
         api_key="sk", base_url=BASE_URL, poll_interval=0.0
     )
-    result = await parser.parse_document(pdf, out)
+    # Test the async impl directly: the public ``parse_document`` is a
+    # sync wrapper that runs this in a worker thread (so RAGAnything's
+    # sync Parser interface is honoured). The wire/parser logic lives
+    # entirely in ``_parse_document_async``.
+    result = await parser._parse_document_async(pdf, out)
 
     assert all(isinstance(item, dict) for item in result)
     for item in result:
