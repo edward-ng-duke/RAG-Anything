@@ -92,7 +92,7 @@ class Job(Base):
     tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     document_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("documents.document_id"),
+        ForeignKey("documents.document_id", ondelete="CASCADE"),
     )
     # job_type: ingest | reindex | delete
     job_type: Mapped[str] = mapped_column(Text, nullable=False)
