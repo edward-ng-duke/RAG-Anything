@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import logging
 import os
 from functools import lru_cache
 from typing import Any
@@ -51,6 +52,8 @@ from rag_service.core.llm_provider import (
     make_vlm_func,
 )
 from rag_service.core.paths import tenant_working_dir, validate_tenant_id
+
+_logger = logging.getLogger(__name__)
 
 
 def _populate_postgres_env_from_dsn(database_url: str) -> None:
@@ -293,7 +296,23 @@ class RAGAnythingCache:
             instance, "_ensure_lightrag_initialized", None
         )
         if init is not None and asyncio.iscoroutinefunction(init):
-            await init()
+            try:
+                await init()
+            except Exception as e:  # noqa: BLE001
+                # Migration 005 owns LIGHTRAG_FULL_{ENTITIES,RELATIONS}
+                # creation, but lightrag's helper still tries to create
+                # them on every cold-start. The losers of that race
+                # surface ``relation "..." already exists`` from PG. The
+                # operation is a no-op once any party wins, so we log it
+                # at DEBUG and continue. Anything else re-raises.
+                msg = str(e).lower()
+                if "already exists" in msg:
+                    _logger.debug(
+                        "lightrag init: ignoring already-exists from %r",
+                        e,
+                    )
+                else:
+                    raise
         return instance
 
 
