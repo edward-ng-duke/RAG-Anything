@@ -351,17 +351,24 @@ async def perform_upload(
                 # original path still has a valid file.
                 pass
 
-    # 5) Dedup by (tenant_id, content_hash). On a hit we discard the
-    # newly-written file and surface the existing document_id.
-    existing_stmt = select(_models.Document.document_id).where(
+    # 5) Dedup by (tenant_id, content_hash). A LIVE row (anything other
+    # than ``deleted`` / ``failed``) wins as a dedup hit. A dead row gets
+    # reactivated in place: keep the same document_id, swap in the new
+    # file, flip status back to ``pending`` and enqueue a fresh ingest job.
+    # Reactivating preserves KG / source references that point at the old
+    # document_id across delete + re-upload cycles.
+    existing_stmt = select(_models.Document).where(
         _models.Document.tenant_id == tenant_id,
         _models.Document.content_hash == content_hash,
     )
-    existing = (await db.execute(existing_stmt)).first()
-    if existing is not None:
+    existing = (await db.execute(existing_stmt)).scalar_one_or_none()
+
+    DEAD_STATUSES = ("deleted", "failed")
+
+    if existing is not None and existing.status not in DEAD_STATUSES:
         _safe_unlink(dest)
         return UploadResult(
-            document_id=existing[0],
+            document_id=existing.document_id,
             job_id=uuid.uuid4(),
             status="dedup",
             deduplicated=True,
@@ -371,19 +378,31 @@ async def perform_upload(
             mime_type=mime_type,
         )
 
-    # 6) Insert document + job rows.
-    document = _models.Document(
-        document_id=doc_id,
-        tenant_id=tenant_id,
-        file_name=raw_name,
-        file_size=size,
-        content_hash=content_hash,
-        mime_type=mime_type,
-        storage_path=str(dest),
-        status="pending",
-    )
-    db.add(document)
-    await db.flush()
+    # 6) Insert document + job rows — or reactivate the dead row.
+    if existing is not None:
+        # Reactivate: keep document_id stable; refresh file metadata.
+        if existing.storage_path and existing.storage_path != str(dest):
+            _safe_unlink(Path(existing.storage_path))
+        existing.status = "pending"
+        existing.storage_path = str(dest)
+        existing.file_name = raw_name
+        existing.file_size = size
+        existing.mime_type = mime_type
+        doc_id = existing.document_id
+        await db.flush()
+    else:
+        document = _models.Document(
+            document_id=doc_id,
+            tenant_id=tenant_id,
+            file_name=raw_name,
+            file_size=size,
+            content_hash=content_hash,
+            mime_type=mime_type,
+            storage_path=str(dest),
+            status="pending",
+        )
+        db.add(document)
+        await db.flush()
 
     job = _models.Job(
         tenant_id=tenant_id,

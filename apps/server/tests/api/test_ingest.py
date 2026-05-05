@@ -100,10 +100,19 @@ class _FakeSession:
         *,
         quota_mb: int | None = 1024,
         used_bytes: int = 0,
+        dedup_status: str = "pending",
+        dedup_storage_path: str | None = None,
     ) -> None:
         self.added: list[Any] = []
         self._dedup_for_hash = dedup_for_hash
         self._dedup_doc_id = dedup_doc_id
+        self._dedup_status = dedup_status
+        self._dedup_storage_path = dedup_storage_path
+        # Mutable record we hand back from the dedup query — the
+        # reactivate path mutates it in place (status / storage_path /
+        # file_name / file_size / mime_type) so the test can assert the
+        # final shape.
+        self.dedup_row: Any | None = None
         self._quota_mb = quota_mb
         self._used_bytes = used_bytes
         self.commits = 0
@@ -135,12 +144,25 @@ class _FakeSession:
         if "sum(documents.file_size)" in compiled or "SUM(documents.file_size)" in compiled:
             return _FakeResult(None, scalar=self._used_bytes)
 
-        # Dedup query: filters on a literal content_hash.
+        # Dedup query: filters on a literal content_hash. The new dedup
+        # branch reads the full ``Document`` row (not just document_id)
+        # so it can inspect ``.status`` and reactivate dead rows in
+        # place. Hand back a SimpleNamespace that quacks like the ORM
+        # row for our purposes.
         if (
             self._dedup_for_hash is not None
             and self._dedup_for_hash in compiled
         ):
-            return _FakeResult((self._dedup_doc_id,))
+            from types import SimpleNamespace
+            self.dedup_row = SimpleNamespace(
+                document_id=self._dedup_doc_id,
+                status=self._dedup_status,
+                storage_path=self._dedup_storage_path,
+                file_name="prior.bin",
+                file_size=0,
+                mime_type=None,
+            )
+            return _FakeResult(None, scalar=self.dedup_row)
         return _FakeResult(None)
 
 
@@ -316,6 +338,81 @@ def test_ingest_dedup_returns_existing(tmp_data_dir, monkeypatch):
     # The on-disk file should have been removed.
     uploads = list((tmp_data_dir / "uploads" / "tnt-1").glob("*"))
     assert uploads == []
+
+
+def test_ingest_dedup_skips_soft_deleted(tmp_data_dir, monkeypatch):
+    """A soft-deleted row with the same content_hash is NOT a dedup hit.
+
+    Reactivate path must run instead: same document_id, status flips back
+    to ``pending``, a fresh ingest job is enqueued.
+    """
+    import hashlib
+
+    pdf_bytes = b"%PDF-1.4\n%%EOF\n"
+    existing_doc_id = uuid.uuid4()
+    content_hash = hashlib.sha256(pdf_bytes).hexdigest()
+
+    session = _FakeSession(
+        dedup_for_hash=content_hash,
+        dedup_doc_id=existing_doc_id,
+        dedup_status="deleted",
+        dedup_storage_path="/tmp/old/path.pdf",
+    )
+    enqueue = AsyncMock(return_value=None)
+    app = _make_app(session, enqueue, monkeypatch)
+
+    client = TestClient(app)
+    r = client.post(
+        "/v1/ingest",
+        files={"file": ("again.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # NOT a dedup hit — the response reports a fresh queued job for the
+    # same document_id.
+    assert body["deduplicated"] is False
+    assert body["status"] == "queued"
+    assert body["document_id"] == str(existing_doc_id)
+    enqueue.assert_awaited_once()
+    # The reactivated row was mutated in place (no new Document added —
+    # only a Job row goes through ``session.add``).
+    assert session.dedup_row is not None
+    assert session.dedup_row.status == "pending"
+    assert session.dedup_row.document_id == existing_doc_id
+    assert all(
+        type(o).__name__ != "Document" for o in session.added
+    ), "reactivate path must not insert a new Document"
+
+
+def test_ingest_dedup_skips_failed_status(tmp_data_dir, monkeypatch):
+    """A previously-failed row is also reactivated, not deduped."""
+    import hashlib
+
+    pdf_bytes = b"%PDF-1.4\n%%EOF\n"
+    existing_doc_id = uuid.uuid4()
+    content_hash = hashlib.sha256(pdf_bytes).hexdigest()
+
+    session = _FakeSession(
+        dedup_for_hash=content_hash,
+        dedup_doc_id=existing_doc_id,
+        dedup_status="failed",
+    )
+    enqueue = AsyncMock(return_value=None)
+    app = _make_app(session, enqueue, monkeypatch)
+
+    client = TestClient(app)
+    r = client.post(
+        "/v1/ingest",
+        files={"file": ("retry.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "queued"
+    assert body["document_id"] == str(existing_doc_id)
+    enqueue.assert_awaited_once()
+    assert session.dedup_row.status == "pending"
 
 
 def test_ingest_bad_mime_415(tmp_data_dir, monkeypatch):
